@@ -7,6 +7,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a GitHub Release for the version in Cargo.toml (creates the tag v<version>)"
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -59,12 +64,28 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # a pushed v* tag, or "Run workflow" with "release" ticked
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+            # never replace a release that already exists
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+              echo "::error::$tag already exists – raise the version in Cargo.toml first"
+              exit 1
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
         with:
@@ -72,14 +93,18 @@ jobs:
           merge-multiple: true
 
       - name: Release notes from CHANGELOG.md
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           awk -v v="$version" '$0 ~ "^## " { f = ($2 == v) ; next } f' CHANGELOG.md > notes.md
           test -s notes.md || echo "See CHANGELOG.md." > notes.md
           cat notes.md
 
       - uses: softprops/action-gh-release@v2
         with:
-          name: AIS.chat Client ${{ github.ref_name }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: AIS.chat Client ${{ steps.version.outputs.tag }}
           body_path: notes.md
           files: dist/*

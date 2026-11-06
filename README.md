@@ -203,6 +203,10 @@ git tag v1.0.1 && git push origin v1.0.1
 The workflow then builds both versions and publishes a GitHub Release with the
 downloads and the CHANGELOG section as release notes.
 
+Without a tag push: on GitHub open **Actions → Build → Run workflow**, tick
+**release** and start it – the workflow creates the tag `v<version>` from
+`Cargo.toml` itself (and refuses if that release already exists).
+
 ## Code layout
 
 | File | What it does |
