@@ -1,6 +1,6 @@
 [package]
 name = "ais-chat-client"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Small native desktop chat client for a shared AIS.chat character"
 

@@ -11,6 +11,18 @@ system by default, or pick one under **⚙ Settings → Appearance**.
 This is an **unofficial** client: it sends the same requests the website's chat
 box sends. AIS.chat "can make mistakes" – check what it tells you.
 
+## Download
+
+Get the newest version from the
+[**Releases page**](https://github.com/dijakonal/wpu-feel-chatbot/releases/latest):
+
+- **Windows:** `ais-chat-client-windows-x86_64.exe` – just start it. Windows may
+  say the app is from an unknown publisher: click *More info → Run anyway*.
+- **Linux:** `ais-chat-client-linux-x86_64.tar.gz` – unpack it and run
+  `./ais-chat-client` (on X11 it needs `libxkbcommon-x11-0`, see below).
+
+To build it yourself, see [Build & run](#build--run).
+
 ## Using it
 
 1. Start the app. It connects to the class chat by itself ("Online" with a green
@@ -158,7 +170,17 @@ picker uses the desktop's file-chooser portal (`xdg-desktop-portal`, present on
 GNOME/KDE desktops); dragging files onto the window always works.
 
 The GitHub Actions workflow (`.github/workflows/build.yml`) tests and builds on
-Windows and Linux and uploads the binaries as build artifacts.
+Windows and Linux for every push and uploads the binaries as build artifacts.
+
+**Making a release:** add a section for the new version to `CHANGELOG.md`, set
+the same `version` in `Cargo.toml`, commit, then push a tag:
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+The workflow then builds both versions and publishes a GitHub Release with the
+downloads and the CHANGELOG section as release notes.
 
 ## Code layout
 

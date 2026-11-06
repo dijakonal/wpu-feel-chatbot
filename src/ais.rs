@@ -215,7 +215,8 @@ fn router_state_tree(character_id: &str) -> String {
 }
 
 pub(crate) fn http_client(s: &Settings) -> Result<Client> {
-    let ua = if s.user_agent.trim().is_empty() { "ais-chat-client/0.1" } else { s.user_agent.trim() };
+    let default_ua = concat!("ais-chat-client/", env!("CARGO_PKG_VERSION"));
+    let ua = if s.user_agent.trim().is_empty() { default_ua } else { s.user_agent.trim() };
     Ok(Client::builder()
         .user_agent(ua)
         .connect_timeout(Duration::from_secs(15))

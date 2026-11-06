@@ -896,9 +896,17 @@ impl App {
                             let mut on = picker.selected.contains(&f.path);
                             let reason = not_attachable(f);
                             ui.horizontal(|ui| {
-                                let r = ui.add_enabled(reason.is_none(), egui::Checkbox::new(&mut on, &f.path));
-                                if let Some(why) = reason {
-                                    r.on_disabled_hover_text(why);
+                                // long paths are shortened so the size column stays in place
+                                let font = egui::TextStyle::Body.resolve(ui.style());
+                                let label = fit_text(ui, &f.path, &font, ui.available_width() - 110.0);
+                                let r = ui.add_enabled(reason.is_none(), egui::Checkbox::new(&mut on, label));
+                                match reason {
+                                    Some(why) => {
+                                        r.on_disabled_hover_text(format!("{}\n{why}", f.path));
+                                    }
+                                    None => {
+                                        r.on_hover_text(&f.path);
+                                    }
                                 }
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     ui.label(RichText::new(human_size(f.size)).small().color(p.weak));
@@ -1163,32 +1171,42 @@ impl App {
                 // attachments waiting for the next message
                 if !self.pending.is_empty() {
                     let mut remove = None;
-                    ui.horizontal_wrapped(|ui| {
-                        ui.add_space(4.0);
-                        for f in &self.pending {
-                            let (icon, note, color) = match &f.state {
-                                FileState::Uploading => ("", "uploading…".to_string(), p.weak),
-                                FileState::Ready(AttachmentData::Inline(_)) => ("📄", "added as text".to_string(), p.text),
-                                FileState::Ready(AttachmentData::Uploaded(_)) => ("📎", "uploaded".to_string(), p.text),
-                                FileState::Failed(e) => ("⚠", e.clone(), p.danger),
-                            };
-                            theme::chip_frame(ui).show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    if matches!(f.state, FileState::Uploading) {
-                                        ui.add(egui::Spinner::new().size(12.0));
-                                    } else {
-                                        ui.label(RichText::new(icon).color(color));
-                                    }
-                                    ui.label(RichText::new(&f.name).color(color)).on_hover_text(format!("{} – {note}", human_size(f.size)));
-                                    let x = theme::Btn::new(theme::Kind::Ghost, RichText::new("✖").small()).min_size(egui::vec2(20.0, 20.0)).rounding(999.0);
-                                    if ui.add(x).on_hover_text("Remove").clicked() {
-                                        remove = Some(f.id);
-                                    }
+                    // icon/spinner + name + ✖ + margins and gaps around the name
+                    const EXTRA: f32 = 80.0;
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    let row = ui.available_width() - 8.0;
+                    let names: Vec<String> = self.pending.iter().map(|f| fit_text(ui, &f.name, &font, row - EXTRA)).collect();
+                    let widths: Vec<f32> = names.iter().map(|n| text_width(ui, n, &font) + EXTRA).collect();
+                    for line in chip_lines(&widths, row, 8.0) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(4.0);
+                            for i in line {
+                                let f = &self.pending[i];
+                                let (icon, note, color) = match &f.state {
+                                    FileState::Uploading => ("", "loading…".to_string(), p.weak),
+                                    FileState::Ready(AttachmentData::Inline(_)) => ("📄", "added as text".to_string(), p.text),
+                                    FileState::Ready(AttachmentData::Uploaded(_)) => ("📎", "uploaded".to_string(), p.text),
+                                    FileState::Failed(e) => ("⚠", e.clone(), p.danger),
+                                };
+                                theme::chip_frame(ui).show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        if matches!(f.state, FileState::Uploading) {
+                                            ui.add(egui::Spinner::new().size(12.0));
+                                        } else {
+                                            ui.label(RichText::new(icon).color(color));
+                                        }
+                                        ui.add(egui::Label::new(RichText::new(&names[i]).color(color)).extend())
+                                            .on_hover_text(format!("{} · {} – {note}", f.name, human_size(f.size)));
+                                        let x = theme::Btn::new(theme::Kind::Ghost, RichText::new("✖").small()).min_size(egui::vec2(20.0, 20.0)).rounding(999.0);
+                                        if ui.add(x).on_hover_text("Remove").clicked() {
+                                            remove = Some(f.id);
+                                        }
+                                    });
                                 });
-                            });
-                        }
-                    });
+                            }
+                        });
+                    }
                     if let Some(id) = remove {
                         self.pending.retain(|f| f.id != id);
                     }
@@ -1807,19 +1825,33 @@ fn message_row(
                                 ui.label(RichText::new(shown).color(p.on_accent));
                             }
                             if !m.attachments.is_empty() {
-                                ui.horizontal_wrapped(|ui| {
-                                    for a in &m.attachments {
-                                        egui::Frame::none()
-                                            .fill(Color32::from_white_alpha(36))
-                                            .rounding(999.0)
-                                            .inner_margin(egui::Margin::symmetric(9.0, 3.0))
-                                            .show(ui, |ui| {
-                                                let icon = if matches!(a.data, AttachmentData::Inline(_)) { "📄" } else { "📎" };
-                                                ui.label(RichText::new(format!("{icon} {}", a.name)).small().color(p.on_accent))
-                                                    .on_hover_text(human_size(a.size));
-                                            });
-                                    }
-                                });
+                                let font = egui::TextStyle::Small.resolve(ui.style());
+                                let row = ui.available_width();
+                                let texts: Vec<String> = m
+                                    .attachments
+                                    .iter()
+                                    .map(|a| {
+                                        let icon = if matches!(a.data, AttachmentData::Inline(_)) { "📄" } else { "📎" };
+                                        fit_text(ui, &format!("{icon} {}", a.name), &font, row - 18.0)
+                                    })
+                                    .collect();
+                                let widths: Vec<f32> = texts.iter().map(|t| text_width(ui, t, &font) + 18.0).collect();
+                                for line in chip_lines(&widths, row, 6.0) {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        for i in line {
+                                            let a = &m.attachments[i];
+                                            egui::Frame::none()
+                                                .fill(Color32::from_white_alpha(36))
+                                                .rounding(999.0)
+                                                .inner_margin(egui::Margin::symmetric(9.0, 3.0))
+                                                .show(ui, |ui| {
+                                                    let label = egui::Label::new(RichText::new(&texts[i]).small().color(p.on_accent)).extend();
+                                                    ui.add(label).on_hover_text(format!("{} · {}", a.name, human_size(a.size)));
+                                                });
+                                        }
+                                    });
+                                }
                             }
                         });
                     });
@@ -1979,6 +2011,50 @@ fn short_quote(q: &str, max: usize) -> String {
     s
 }
 
+fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
+    ui.painter().layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE).size().x
+}
+
+/// `text` shortened with "…" (in the middle, so the file extension stays visible) until it is
+/// at most `max` pixels wide.
+fn fit_text(ui: &egui::Ui, text: &str, font: &egui::FontId, max: f32) -> String {
+    if text_width(ui, text, font) <= max {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut keep = chars.len();
+    while keep > 4 {
+        keep -= 1;
+        let tail = (keep / 3).max(1);
+        let head = keep - tail;
+        let s: String = chars[..head].iter().chain(['…'].iter()).chain(chars[chars.len() - tail..].iter()).collect();
+        if text_width(ui, &s, font) <= max {
+            return s;
+        }
+    }
+    "…".to_string()
+}
+
+/// Split chips of the given widths into lines of at most `row` pixels (`gap` between chips).
+/// Every chip lands on some line, even one wider than a whole line.
+fn chip_lines(widths: &[f32], row: f32, gap: f32) -> Vec<Vec<usize>> {
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0;
+    for (i, w) in widths.iter().enumerate() {
+        match lines.last_mut() {
+            Some(line) if used + gap + w <= row => {
+                line.push(i);
+                used += gap + w;
+            }
+            _ => {
+                lines.push(vec![i]);
+                used = *w;
+            }
+        }
+    }
+    lines
+}
+
 fn human_size(n: usize) -> String {
     if n >= 1024 * 1024 {
         format!("{:.1} MB", n as f64 / 1024.0 / 1024.0)
@@ -2057,6 +2133,14 @@ mod tests {
     fn cleans_quotes() {
         assert_eq!(clean_quote("  a  \n\n\n\nb\n "), "a\n\nb");
         assert_eq!(clean_quote(&"x".repeat(2000)).chars().count(), 1501);
+    }
+
+    #[test]
+    fn splits_chips_into_lines() {
+        use super::chip_lines;
+        assert_eq!(chip_lines(&[100.0, 100.0, 100.0], 250.0, 10.0), vec![vec![0, 1], vec![2]]);
+        assert_eq!(chip_lines(&[300.0, 50.0], 250.0, 10.0), vec![vec![0], vec![1]], "too wide still gets its own line");
+        assert_eq!(chip_lines(&[], 250.0, 10.0), Vec::<Vec<usize>>::new());
     }
 
     #[test]
