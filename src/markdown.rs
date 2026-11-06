@@ -188,6 +188,26 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// Join neighbouring text pieces that look the same. The parser splits text at characters like
+/// `[`, and every piece would otherwise become its own label (odd wrapping and spacing).
+fn merge_text(items: Vec<Inline>) -> Vec<Inline> {
+    let mut out: Vec<Inline> = Vec::with_capacity(items.len());
+    for it in items {
+        if let (
+            Some(Inline::Text { text: prev, strong: s1, italic: i1, strike: k1, code: c1, heading: h1 }),
+            Inline::Text { text, strong, italic, strike, code, heading },
+        ) = (out.last_mut(), &it)
+        {
+            if *s1 == *strong && *i1 == *italic && *k1 == *strike && *c1 == *code && *h1 == *heading {
+                prev.push_str(text);
+                continue;
+            }
+        }
+        out.push(it);
+    }
+    out
+}
+
 fn flush(loose: &mut Vec<Inline>, out: &mut Vec<Block>) {
     if !loose.is_empty() {
         out.push(Block::Paragraph(std::mem::take(loose)));
@@ -207,7 +227,19 @@ fn heading_num(l: HeadingLevel) -> u8 {
 
 fn parse(md: &str) -> Vec<Block> {
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    Builder { events: Parser::new_ext(md, opts).peekable() }.blocks_until(None)
+    let blocks = Builder { events: Parser::new_ext(md, opts).peekable() }.blocks_until(None);
+    blocks.into_iter().map(merge_block).collect()
+}
+
+fn merge_block(b: Block) -> Block {
+    match b {
+        Block::Paragraph(i) => Block::Paragraph(merge_text(i)),
+        Block::Heading(l, i) => Block::Heading(l, merge_text(i)),
+        Block::List { start, items } => Block::List { start, items: items.into_iter().map(|bs| bs.into_iter().map(merge_block).collect()).collect() },
+        Block::Quote(bs) => Block::Quote(bs.into_iter().map(merge_block).collect()),
+        Block::Table { align, rows } => Block::Table { align, rows: rows.into_iter().map(|r| r.into_iter().map(merge_text).collect()).collect() },
+        other => other,
+    }
 }
 
 // ------------------------------------------------------------------ drawing
@@ -310,7 +342,13 @@ fn block(ui: &mut Ui, b: &Block) {
 }
 
 fn inlines(ui: &mut Ui, items: &[Inline]) {
-    ui.horizontal_wrapped(|ui| inline_items(ui, items, true));
+    ui.scope(|ui| {
+        // A wrapped row starts out as tall as a button; make it as tall as a line of text so
+        // the first line is not spaced differently from the others.
+        let body = ui.style().text_styles.get(&TextStyle::Body).map(|f| f.size).unwrap_or(15.0);
+        ui.spacing_mut().interact_size.y = (body * 1.5).round();
+        ui.horizontal_wrapped(|ui| inline_items(ui, items, true));
+    });
 }
 
 /// Table cells: no wrapping (the table scrolls sideways instead of squeezing the columns).
@@ -320,11 +358,14 @@ fn inlines_nowrap(ui: &mut Ui, items: &[Inline]) {
 
 fn inline_items(ui: &mut Ui, items: &[Inline], wrap: bool) {
     {
-        ui.spacing_mut().item_spacing.x = 0.0;
+        // One fixed line height for every piece, and no extra gap between wrapped rows: a long
+        // paragraph is several labels, and their rows must be spaced like the rows inside one.
+        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+        let body = ui.style().text_styles.get(&TextStyle::Body).map(|f| f.size).unwrap_or(15.0);
         for it in items {
             match it {
                 Inline::Text { text, strong, italic, strike, code, heading } => {
-                    let mut rt = RichText::new(text);
+                    let mut rt = RichText::new(text).line_height(Some((body * 1.5).round()));
                     if let Some(h) = heading {
                         let size = match h {
                             1 => 24.0,
@@ -332,7 +373,7 @@ fn inline_items(ui: &mut Ui, items: &[Inline], wrap: bool) {
                             3 => 17.0,
                             _ => 15.0,
                         };
-                        rt = rt.font(FontId::new(size, crate::theme::bold())).strong();
+                        rt = rt.font(FontId::new(size, crate::theme::bold())).strong().line_height(Some((size * 1.35_f32).round()));
                     }
                     if *code {
                         rt = rt.code();
@@ -353,7 +394,7 @@ fn inline_items(ui: &mut Ui, items: &[Inline], wrap: bool) {
                     }
                 }
                 Inline::Link { text, url } => {
-                    ui.hyperlink_to(text, url).on_hover_text(url);
+                    ui.hyperlink_to(RichText::new(text).line_height(Some((body * 1.5).round())), url).on_hover_text(url);
                 }
                 Inline::Break => {
                     if wrap {
@@ -428,6 +469,14 @@ mod tests {
         }
         assert!(matches!(b[5], Block::Quote(_)));
         assert_eq!(b[6], Block::Rule);
+    }
+
+    #[test]
+    fn brackets_do_not_split_text() {
+        let b = parse("Mit zahlen[0] greifst du **zu** und x[1].");
+        let Block::Paragraph(inl) = &b[0] else { panic!() };
+        assert_eq!(inl.len(), 3, "{inl:?}");
+        assert!(matches!(&inl[0], Inline::Text { text, .. } if text == "Mit zahlen[0] greifst du "));
     }
 
     #[test]

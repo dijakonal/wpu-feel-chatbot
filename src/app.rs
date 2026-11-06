@@ -67,6 +67,15 @@ pub struct App {
     activity: String,
     error: Option<String>,
     focus_input: bool,
+    /// Part of an answer the next message replies to.
+    quote: Option<String>,
+    /// Where the floating "Reply" button sits while text is selected (last frame).
+    reply_button: Option<egui::Rect>,
+    /// Where the pointer was released after selecting text, and whether the drag went
+    /// downwards (then the button goes below that point, otherwise above it).
+    selection_anchor: Option<(egui::Pos2, bool)>,
+    /// Where the current/last drag started.
+    drag_origin: Option<egui::Pos2>,
 
     // settings window
     show_settings: bool,
@@ -103,6 +112,10 @@ impl App {
             activity: String::new(),
             error: None,
             focus_input: true,
+            quote: None,
+            reply_button: None,
+            selection_anchor: None,
+            drag_origin: None,
             show_settings: false,
             curl_input: String::new(),
             settings_note: None,
@@ -114,6 +127,7 @@ impl App {
         };
         app.reset_chat();
         app.start_refresh(false);
+        install_quote_capture(&cc.egui_ctx);
         app
     }
 
@@ -203,7 +217,11 @@ impl App {
             })
             .collect();
         let text = std::mem::take(&mut self.input);
-        self.messages.push(ChatMessage::user_with(text.trim(), attachments));
+        let mut msg = ChatMessage::user_with(text.trim(), attachments);
+        if let Some(q) = self.quote.take() {
+            msg = msg.with_quote(&q);
+        }
+        self.messages.push(msg);
         self.start_reply();
     }
 
@@ -264,6 +282,7 @@ impl App {
         self.activity.clear();
         self.error = None;
         self.pending.clear();
+        self.quote = None;
         self.session_id = ais::new_session_id();
         let greeting = if self.settings.greeting.trim().is_empty() { FALLBACK_GREETING } else { self.settings.greeting.as_str() };
         self.messages = vec![ChatMessage::greeting(greeting)];
@@ -464,6 +483,39 @@ impl App {
             })
             .inner_margin(egui::Margin { left: 8.0, right: 8.0, top: 8.0, bottom: 8.0 })
             .show(ui, |ui| {
+                // the part of an answer this message replies to
+                if let Some(q) = self.quote.clone() {
+                    let mut cancel = false;
+                    egui::Frame::none()
+                        .fill(p.accent_soft)
+                        .rounding(12.0)
+                        .inner_margin(egui::Margin { left: 16.0, right: 6.0, top: 6.0, bottom: 6.0 })
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let r = ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_width(ui.available_width() - 34.0);
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    ui.label(RichText::new("↩ Replying to").small().family(theme::bold()).color(p.accent_hover));
+                                    ui.add(egui::Label::new(RichText::new(short_quote(&q, 220)).small().color(p.weak)).wrap());
+                                });
+                                let x = theme::Btn::new(theme::Kind::Ghost, RichText::new("✖").small()).min_size(egui::vec2(26.0, 26.0)).rounding(999.0);
+                                if ui.add(x).on_hover_text("Don't reply to this (Esc)").clicked() {
+                                    cancel = true;
+                                }
+                            });
+                            let bar = egui::Rect::from_min_max(
+                                r.response.rect.left_top() - egui::vec2(9.0, 0.0),
+                                r.response.rect.left_bottom() - egui::vec2(6.0, 0.0),
+                            );
+                            ui.painter().rect_filled(bar, 2.0, p.accent);
+                        });
+                    if cancel || (focused && ui.input(|i| i.key_pressed(Key::Escape))) {
+                        self.quote = None;
+                    }
+                    ui.add_space(2.0);
+                }
+
                 // attachments waiting for the next message
                 if !self.pending.is_empty() {
                     let mut remove = None;
@@ -536,7 +588,7 @@ impl App {
         theme::remember_hover(ui, composer_id, composer.response.hovered() || ui.rect_contains_pointer(composer.response.rect));
         ui.add_space(4.0);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("Enter to send · Shift+Enter for a new line · AIS.chat can make mistakes").small().color(p.weak));
+            ui.label(RichText::new("Enter to send · Shift+Enter for a new line · select text in an answer to reply to it").small().color(p.weak));
         });
         if send_now {
             self.send();
@@ -799,6 +851,57 @@ impl App {
         }
     }
 
+    /// Floating "Reply" button next to selected text.
+    fn reply_to_selection(&mut self, ctx: &egui::Context) {
+        let has_selection = egui::text_selection::LabelSelectionState::load(ctx).has_selection();
+        let (down, released, pos, origin) =
+            ctx.input(|i| (i.pointer.primary_down(), i.pointer.any_released(), i.pointer.interact_pos(), i.pointer.press_origin()));
+        if origin.is_some() {
+            self.drag_origin = origin;
+        }
+        let origin = self.drag_origin;
+        if !has_selection || self.show_settings {
+            self.selection_anchor = None;
+        } else if released || (self.selection_anchor.is_none() && !down) {
+            if let Some(p) = pos {
+                let downwards = origin.map(|o| p.y >= o.y - 4.0).unwrap_or(true);
+                self.selection_anchor = Some((p, downwards));
+            }
+        }
+        self.reply_button = None;
+        let Some((anchor, downwards)) = self.selection_anchor else { return };
+        if down {
+            return;
+        }
+        // keep the button off the selected lines: below the last one, or above the first one
+        let screen = ctx.screen_rect();
+        let size = egui::vec2(96.0, 34.0);
+        let below = anchor.y + 16.0;
+        let above = anchor.y - size.y - 16.0;
+        let mut at = egui::pos2(anchor.x - size.x / 2.0, if downwards { below } else { above });
+        if at.y + size.y > screen.bottom() - 8.0 {
+            at.y = above;
+        } else if at.y < screen.top() + 8.0 {
+            at.y = below;
+        }
+        at.x = at.x.clamp(screen.left() + 8.0, screen.right() - size.x - 8.0);
+        let resp = egui::Area::new(egui::Id::new("reply-to-selection"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(at)
+            .show(ctx, |ui| {
+                let p = theme::of(ui);
+                egui::Frame::none()
+                    .shadow(egui::epaint::Shadow { offset: egui::vec2(0.0, 4.0), blur: 14.0, spread: 0.0, color: Color32::from_black_alpha(60) })
+                    .rounding(999.0)
+                    .show(ui, |ui| {
+                        ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new("↩  Reply").family(theme::bold()).color(p.on_accent)).rounding(999.0))
+                            .on_hover_text("Reply to the selected text")
+                    })
+                    .inner
+            });
+        self.reply_button = Some(resp.inner.rect);
+    }
+
     fn drop_zone(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for f in dropped {
@@ -900,10 +1003,34 @@ fn message_row(ui: &mut egui::Ui, m: &ChatMessage, name: &str, waiting: bool, ac
                             .size()
                             .x;
                         let files_w: f32 = m.attachments.iter().map(|a| a.name.chars().count() as f32 * 7.0 + 44.0).sum();
-                        let w = text_w.max(files_w.min(max_w)).clamp(10.0, max_w) + 1.0;
+                        let quote_w = m
+                            .quote
+                            .as_deref()
+                            .map(|q| {
+                                let font = egui::TextStyle::Small.resolve(ui.style());
+                                ui.painter().layout(short_quote(q, 240), font, p.on_accent, max_w - 24.0).size().x + 24.0
+                            })
+                            .unwrap_or(0.0);
+                        let w = text_w.max(files_w.min(max_w)).max(quote_w).clamp(10.0, max_w) + 1.0;
                         ui.set_max_width(w);
                         ui.set_min_width(w);
                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                            if let Some(q) = &m.quote {
+                                let r = egui::Frame::none()
+                                    .fill(Color32::from_black_alpha(40))
+                                    .rounding(8.0)
+                                    .inner_margin(egui::Margin { left: 12.0, right: 8.0, top: 5.0, bottom: 5.0 })
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.add(
+                                            egui::Label::new(RichText::new(short_quote(q, 240)).small().color(p.on_accent.gamma_multiply(0.85))).wrap(),
+                                        );
+                                    });
+                                let rect = r.response.rect;
+                                let bar = egui::Rect::from_min_max(rect.left_top() + egui::vec2(4.0, 5.0), rect.left_bottom() + egui::vec2(7.0, -5.0));
+                                ui.painter().rect_filled(bar, 1.5, Color32::from_white_alpha(170));
+                                ui.add_space(2.0);
+                            }
                             if !shown.trim().is_empty() {
                                 ui.label(RichText::new(shown).color(p.on_accent));
                             }
@@ -1009,6 +1136,69 @@ fn notice(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(6.0);
 }
 
+fn capture_armed_id() -> egui::Id {
+    egui::Id::new("quote-capture-armed")
+}
+
+fn capture_text_id() -> egui::Id {
+    egui::Id::new("quote-capture-text")
+}
+
+/// Runs after egui's own text-selection code at the end of every frame: when the Reply button
+/// was pressed, take the text egui collected for the clipboard and keep it for the quote
+/// instead (the clipboard is left alone).
+fn install_quote_capture(ctx: &egui::Context) {
+    ctx.on_end_pass(
+        "quote-capture",
+        std::sync::Arc::new(|ctx: &egui::Context| {
+            let armed = ctx.data_mut(|d| d.remove_temp::<bool>(capture_armed_id())).unwrap_or(false);
+            if armed {
+                let text = ctx.output_mut(|o| std::mem::take(&mut o.copied_text));
+                ctx.data_mut(|d| d.insert_temp(capture_text_id(), text));
+                ctx.request_repaint();
+            }
+        }),
+    );
+}
+
+/// Tidy selected text for quoting: trim, no runs of blank lines, at most 1500 characters.
+fn clean_quote(text: &str) -> String {
+    let mut out = String::new();
+    let mut blank = 0;
+    for line in text.trim().lines() {
+        if line.trim().is_empty() {
+            blank += 1;
+            if blank > 1 {
+                continue;
+            }
+        } else {
+            blank = 0;
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    let out = out.trim_end().to_string();
+    if out.chars().count() > 1500 {
+        format!("{}…", out.chars().take(1500).collect::<String>())
+    } else {
+        out
+    }
+}
+
+/// First `max` characters on at most four lines, for previews.
+fn short_quote(q: &str, max: usize) -> String {
+    let lines: Vec<&str> = q.lines().collect();
+    let mut s = lines.iter().take(4).copied().collect::<Vec<_>>().join("\n");
+    let cut = s.chars().count() > max;
+    if cut {
+        s = s.chars().take(max).collect();
+    }
+    if cut || lines.len() > 4 {
+        s.push('…');
+    }
+    s
+}
+
 fn human_size(n: usize) -> String {
     if n >= 1024 * 1024 {
         format!("{:.1} MB", n as f64 / 1024.0 / 1024.0)
@@ -1025,8 +1215,34 @@ impl eframe::App for App {
         visuals.panel_fill.to_normalized_gamma_f32()
     }
 
+    /// While the "Reply" button is shown, a click on it makes egui collect the selected text
+    /// (as if Ctrl+C was pressed) in the same frame, before the click clears the selection.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let Some(rect) = self.reply_button else { return };
+        let pressed_on_button = raw_input.events.iter().any(|e| {
+            matches!(e, egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } if rect.contains(*pos))
+        });
+        if pressed_on_button {
+            raw_input.events.push(egui::Event::Copy);
+            ctx.data_mut(|d| d.insert_temp(capture_armed_id(), true));
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_messages();
+
+        // text captured by the Reply button last frame
+        if let Some(text) = ctx.data_mut(|d| d.remove_temp::<String>(capture_text_id())) {
+            let text = clean_quote(&text);
+            if !text.is_empty() {
+                self.quote = Some(text);
+                self.focus_input = true;
+            }
+            self.selection_anchor = None;
+            let mut sel = egui::text_selection::LabelSelectionState::load(ctx);
+            sel.clear_selection();
+            sel.store(ctx);
+        }
 
         let title = format!("{} – AIS.chat", self.settings.display_name());
         if title != self.title {
@@ -1039,9 +1255,28 @@ impl eframe::App for App {
         self.bottom_bar(ctx);
         self.chat(ctx);
         self.settings_window(ctx);
+        self.reply_to_selection(ctx);
 
         if self.busy || self.pending.iter().any(|f| matches!(f.state, FileState::Uploading)) {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_quote, short_quote};
+
+    #[test]
+    fn cleans_quotes() {
+        assert_eq!(clean_quote("  a  \n\n\n\nb\n "), "a\n\nb");
+        assert_eq!(clean_quote(&"x".repeat(2000)).chars().count(), 1501);
+    }
+
+    #[test]
+    fn shortens_quotes() {
+        assert_eq!(short_quote("1\n2\n3\n4\n5", 100), "1\n2\n3\n4…");
+        assert_eq!(short_quote("abcdef", 3), "abc…");
+        assert_eq!(short_quote("ok", 10), "ok");
     }
 }

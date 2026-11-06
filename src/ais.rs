@@ -52,6 +52,9 @@ pub struct ChatMessage {
     pub born: std::time::Instant,
     /// The fixed greeting shown at the top of every chat (sent as "initial-message").
     pub initial: bool,
+    /// Part of an earlier answer this message replies to (shown above the text; sent as a
+    /// Markdown quote at the start of `content`).
+    pub quote: Option<String>,
 }
 
 fn now_iso() -> String {
@@ -64,7 +67,7 @@ fn new_id() -> String {
 
 impl ChatMessage {
     pub fn greeting(text: &str) -> Self {
-        Self { id: "initial-message".into(), role: Role::Assistant, content: text.into(), display: None, attachments: Vec::new(), created_at: now_iso(), born: std::time::Instant::now(), initial: true }
+        Self { id: "initial-message".into(), role: Role::Assistant, content: text.into(), display: None, attachments: Vec::new(), created_at: now_iso(), born: std::time::Instant::now(), initial: true, quote: None }
     }
     #[allow(dead_code)]
     pub fn user(text: &str) -> Self {
@@ -87,10 +90,24 @@ impl ChatMessage {
             display = None;
         }
         let content = content.trim_start().to_string();
-        Self { id: new_id(), role: Role::User, content, display, attachments, created_at: now_iso(), born: std::time::Instant::now(), initial: false }
+        Self { id: new_id(), role: Role::User, content, display, attachments, created_at: now_iso(), born: std::time::Instant::now(), initial: false, quote: None }
+    }
+    /// Reply to part of an earlier answer: the quote goes in front of the message as Markdown
+    /// (`> …`) so the bot sees what is meant; the window shows it separately above the text.
+    pub fn with_quote(mut self, quote: &str) -> Self {
+        let q = quote.trim();
+        if q.is_empty() {
+            return self;
+        }
+        let shown = self.display.clone().unwrap_or_else(|| self.content.clone());
+        let quoted: Vec<String> = q.lines().map(|l| if l.trim().is_empty() { ">".to_string() } else { format!("> {l}") }).collect();
+        self.content = format!("{}\n\n{}", quoted.join("\n"), self.content);
+        self.display = Some(shown);
+        self.quote = Some(q.to_string());
+        self
     }
     pub fn assistant_placeholder() -> Self {
-        Self { id: new_id(), role: Role::Assistant, content: String::new(), display: None, attachments: Vec::new(), created_at: now_iso(), born: std::time::Instant::now(), initial: false }
+        Self { id: new_id(), role: Role::Assistant, content: String::new(), display: None, attachments: Vec::new(), created_at: now_iso(), born: std::time::Instant::now(), initial: false, quote: None }
     }
     pub fn touch(&mut self) {
         self.created_at = now_iso();
@@ -838,6 +855,17 @@ mod tests {
         let block = inline_block("a.md", "x\n```\ny\n```");
         assert!(block.contains("````md\n"));
         assert!(block.ends_with("\n````"));
+    }
+
+    #[test]
+    fn quote_is_sent_as_markdown_and_hidden_in_display() {
+        let m = ChatMessage::user("Why this?").with_quote("x = 1\n\ny = 2");
+        assert_eq!(m.content, "> x = 1\n>\n> y = 2\n\nWhy this?");
+        assert_eq!(m.display.as_deref(), Some("Why this?"));
+        assert_eq!(m.quote.as_deref(), Some("x = 1\n\ny = 2"));
+        let plain = ChatMessage::user("Hi").with_quote("  ");
+        assert_eq!(plain.content, "Hi");
+        assert!(plain.quote.is_none());
     }
 
     #[test]

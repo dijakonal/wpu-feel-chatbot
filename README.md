@@ -18,7 +18,11 @@ box sends. AIS.chat "can make mistakes" – check what it tells you.
 2. Type a message, or click one of the suggestions on the start screen.
    **Enter** sends, **Shift+Enter** starts a new line.
 3. **+** in the message box (or dragging files onto the window) attaches files.
-4. **➕ New chat** starts over; the round **■** button stops a long answer;
+4. To ask about one part of an answer, **select that text** and click the
+   **↩ Reply** button that appears next to it. The quote shows above the message
+   box (✖ or Esc removes it) and above your message in the chat; the bot gets it
+   as a Markdown quote (`> …`) in front of your question.
+5. **➕ New chat** starts over; the round **■** button stops a long answer;
    **Copy** under an answer and on code blocks puts text on the clipboard.
 
 There is nothing to set up. To use a *different* shared character, open
