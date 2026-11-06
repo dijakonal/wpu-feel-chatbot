@@ -738,8 +738,7 @@ impl App {
         }
         let files = github::files_for(&chosen, &self.settings.github_folder());
         let keys: Vec<String> = chosen.iter().map(|(n, _)| format!("{msg}#{n}")).collect();
-        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
-        let message = format!("Update {}\n\nSaved from the AIS.chat chat \"{}\".", paths.join(", "), self.convs[ci].title());
+        let title = self.convs[ci].title();
         for k in &keys {
             self.push_states.insert(k.clone(), PushState::Pushing);
         }
@@ -748,7 +747,7 @@ impl App {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let result = save_to_github(&s, &cfg, files, &message).map_err(|e| e.to_string());
+            let result = save_to_github(&s, &cfg, files, &title).map_err(|e| e.to_string());
             let _ = tx.send(Msg::Pushed { keys, result });
             ctx.request_repaint();
         });
@@ -992,7 +991,11 @@ impl App {
             ui.end_row();
             ui.label("Token");
             ui.add(egui::TextEdit::singleline(&mut self.draft.github_token).password(true).hint_text("github_pat_…").desired_width(w))
-                .on_hover_text("Stored in settings.json on this computer.");
+                .on_hover_text(if self.settings.token_is_in_keystore() {
+                    "Kept in your system's password store (not in settings.json)."
+                } else {
+                    "This system has no password store, so the token is kept in settings.json."
+                });
             ui.end_row();
             ui.label("Branch");
             ui.add(egui::TextEdit::singleline(&mut self.draft.github_branch).hint_text("default branch").desired_width(w));
@@ -1685,14 +1688,35 @@ fn not_attachable(f: &github::RepoFile) -> Option<&'static str> {
     }
 }
 
-/// Save files to GitHub without losing what is already there: a file that exists is merged
-/// with the new code first (the bot writes the complete updated file), new files are saved
-/// as they are, unchanged files are left out. Returns the commit's address.
-fn save_to_github(s: &Settings, cfg: &github::Config, files: Vec<github::FileOut>, message: &str) -> anyhow::Result<String> {
+/// Save files to GitHub without losing what is already there:
+/// - code the answer did not name a file for: the bot picks the file it belongs to (from the
+///   repository's file list) or a fitting new path; if it cannot, a name guessed from the code
+/// - a file that exists is merged with the new code first (the bot writes the complete file)
+/// - new files are saved as they are, unchanged files are left out
+///
+/// All in one commit. Returns the commit's address.
+fn save_to_github(s: &Settings, cfg: &github::Config, files: Vec<github::FileOut>, chat_title: &str) -> anyhow::Result<String> {
     let branch = github::target_branch(cfg)?;
-    let mut out = Vec::new();
+    let folder = s.github_folder();
+    let prefix = if folder.is_empty() { String::new() } else { format!("{folder}/") };
+
+    // the repository's files (inside the folder, if one is set) – only needed for unnamed code
+    let mut repo_files: Option<Vec<String>> = None;
+    let mut placed = Vec::new();
+    let mut out: Vec<github::FileOut> = Vec::new();
     let mut merged = Vec::new();
     for mut f in files {
+        if let Some(info) = f.unnamed.take() {
+            if repo_files.is_none() {
+                let list = github::list_files(cfg).map(|(_, files, _)| files).unwrap_or_default();
+                repo_files = Some(list.into_iter().filter_map(|f| f.path.strip_prefix(&prefix).map(str::to_string)).collect());
+            }
+            let list = repo_files.as_deref().unwrap_or_default();
+            if let Ok(path) = crate::merge::place(s, list, &info.lang, &info.before, &f.content) {
+                f.path = format!("{prefix}{path}");
+                placed.push(f.path.clone());
+            }
+        }
         if let Some(current) = github::read_file_if_exists(cfg, &branch, &f.path)? {
             let content = crate::merge::merge(s, &f.path, &current, &f.content)?;
             if content.trim_end() == current.trim_end() {
@@ -1703,17 +1727,25 @@ fn save_to_github(s: &Settings, cfg: &github::Config, files: Vec<github::FileOut
             }
             f.content = content;
         }
+        // two blocks for the same file: the second one is merged into the first
+        if let Some(prev) = out.iter_mut().find(|o| o.path == f.path) {
+            prev.content = crate::merge::merge(s, &f.path, &prev.content, &f.content)?;
+            continue;
+        }
         out.push(f);
     }
     if out.is_empty() {
         let repo = github::normalize_repo(&cfg.repo).unwrap_or_default();
         return Ok(format!("https://github.com/{repo}/tree/{branch}"));
     }
-    let message = if merged.is_empty() {
-        message.to_string()
-    } else {
-        format!("{message}\nMerged into the existing file: {}", merged.join(", "))
-    };
+    let paths: Vec<&str> = out.iter().map(|f| f.path.as_str()).collect();
+    let mut message = format!("Update {}\n\nSaved from the AIS.chat chat \"{chat_title}\".", paths.join(", "));
+    if !placed.is_empty() {
+        message.push_str(&format!("\nFile chosen by the bot: {}", placed.join(", ")));
+    }
+    if !merged.is_empty() {
+        message.push_str(&format!("\nMerged into the existing file: {}", merged.join(", ")));
+    }
     github::push(cfg, &out, &message)
 }
 
@@ -2160,6 +2192,29 @@ mod tests {
     fn cleans_quotes() {
         assert_eq!(clean_quote("  a  \n\n\n\nb\n "), "a\n\nb");
         assert_eq!(clean_quote(&"x".repeat(2000)).chars().count(), 1501);
+    }
+
+    /// Needs the stand-in GitHub on 127.0.0.1:8765 and the real AIS.chat:
+    /// `cargo test -- --ignored live_save`
+    #[test]
+    #[ignore]
+    fn live_save_places_and_merges_unnamed_code() {
+        let mut s = crate::settings::Settings::default();
+        s.apply_invite_link(crate::settings::DEFAULT_INVITE_LINK).unwrap();
+        crate::ais::refresh(&mut s).expect("setup");
+        s.github_enabled = true;
+        s.github_repo = "lena/schulprojekt".into();
+        s.github_token = "t".into();
+        s.github_api = "http://127.0.0.1:8765".into();
+        let block = crate::markdown::CodeBlockInfo {
+            lang: "rust".into(),
+            code: "    /// Personal access token. Kept in the OS keystore; only read from the file to migrate old versions.\n    #[serde(skip_serializing)]\n    pub github_token: String,".into(),
+            before: "Change the token field in the settings struct:".into(),
+        };
+        let files = crate::github::files_for(&[(3, &block)], "");
+        assert_eq!(files[0].path, "snippet-4.rs");
+        let url = super::save_to_github(&s, &s.github_config(), files, "keystore").expect("save");
+        println!("{url}");
     }
 
     #[test]

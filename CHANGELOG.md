@@ -26,7 +26,10 @@ First release of the AIS.chat desktop client.
   or automatically: a block the answer names (e.g. `src/main.rs`) updates that
   file on your branch, one commit per answer. The bot is asked to always show
   whole files, and if it shows only a part, the app merges it into the existing
-  file instead of overwriting it.
+  file instead of overwriting it. Code without a file name is placed by the bot
+  into the file it belongs to (or gets a fitting new name).
+- The GitHub token is kept in the system's password store (Windows Credential
+  Manager / GNOME Keyring / KWallet), not in `settings.json`.
 
 **Look**
 - Modern light and dark design (follows the system, or choose in Settings).

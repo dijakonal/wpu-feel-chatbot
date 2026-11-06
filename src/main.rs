@@ -10,6 +10,7 @@ mod github;
 mod i18n;
 mod markdown;
 mod merge;
+mod secret;
 mod settings;
 mod theme;
 

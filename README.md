@@ -129,8 +129,15 @@ gives it: when the bot writes "The file `src/main.rs` …" (or starts the code w
 comment like `// src/main.rs`), that block **replaces `src/main.rs`** on the
 branch. All files of one answer become one commit ("Update Cargo.toml,
 src/main.rs"). Automatic mode only saves blocks that name a file, so command
-snippets like `cargo run` are not committed; a block without a file name is saved
-as `code-1.py`, `code-2.js`, … when you click **⬆ GitHub** on it.
+snippets like `cargo run` are not committed.
+
+**Code without a file name.** When you click **⬆ GitHub** on a block the answer
+did not name a file for, the app asks the bot where it belongs, showing it the
+repository's file list: a change to an existing file (say a new field for the
+settings struct) is merged into that file (`src/settings.rs`), new code gets a
+fitting new path (`src/shuffle.rs`). If the bot cannot tell, the name comes from
+the code itself (`fn load_settings` → `load_settings.rs`, `# Mein Spiel` →
+`mein-spiel.md`, otherwise `snippet-1.py`, …).
 
 **Nothing gets lost.** While GitHub saving is on, the bot is asked (in a hidden
 note with every message) to always show the *complete* file with its path. And if
@@ -143,9 +150,11 @@ are, and files that are already up to date are left alone.
 The button turns into **✔ On GitHub** (click it to open the commit) or shows
 what went wrong. Empty repositories and branches that do not exist yet work too.
 
-The token is stored in `settings.json` on this computer – use a token that only
-has access to this one repository, and don't use the app with your token on a
-shared computer.
+The token is stored in your system's credential store (Windows Credential Manager
+or the Linux Secret Service, e.g. GNOME Keyring / KWallet), **not** in
+`settings.json`. A token from an older version is moved there automatically. On a
+system without a credential store the token stays in `settings.json` instead.
+Still use a token that only has access to this one repository.
 
 ## If something does not work
 

@@ -32,6 +32,17 @@ pub struct Config {
 pub struct FileOut {
     pub path: String,
     pub content: String,
+    /// Not set: the answer did not name the file, `path` is only a guess – the bot is asked
+    /// where the code belongs before saving.
+    pub unnamed: Option<Unnamed>,
+}
+
+/// What is known about a code block whose file the answer did not name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Unnamed {
+    pub lang: String,
+    /// The text right before the block in the answer.
+    pub before: String,
 }
 
 struct Api {
@@ -379,9 +390,87 @@ pub fn named_file(block: &CodeBlockInfo) -> Option<String> {
     from_comment.or_else(|| find_file_name(&block.before)).map(|n| n.trim_start_matches("./").to_string())
 }
 
-/// Path for a code block: the file it belongs to, else `code-<n>.<ext>`.
+/// Path for a code block: the file it belongs to, else a name guessed from the code.
 pub fn file_name(block: &CodeBlockInfo, n: usize) -> String {
-    named_file(block).unwrap_or_else(|| format!("code-{}.{}", n + 1, extension(&block.lang)))
+    named_file(block).unwrap_or_else(|| guess_name(block, n))
+}
+
+/// A name for code whose file the answer did not name, taken from what the code defines:
+/// `fn load_settings` → `load_settings.rs`, `class Spiel` → `spiel.py`, `# Mein Spiel` →
+/// `mein-spiel.md`, … ; `snippet-<n>.<ext>` if nothing fits.
+pub fn guess_name(block: &CodeBlockInfo, n: usize) -> String {
+    let ext = extension(&block.lang);
+    let code = &block.code;
+    // a word right after one of the keywords, e.g. "fn" → "load_settings"
+    let after = |keywords: &[&str]| -> Option<String> {
+        code.lines().find_map(|line| {
+            let mut words = line.split(|c: char| c.is_whitespace() || matches!(c, '(' | '{' | ':' | '<' | '=' | ';'));
+            let mut prev = "";
+            for w in words.by_ref() {
+                if keywords.contains(&prev) && !w.is_empty() && w.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    return Some(w.to_string());
+                }
+                if !w.is_empty() {
+                    prev = w;
+                }
+            }
+            None
+        })
+    };
+    let snake = |name: &str| -> String {
+        let mut out = String::new();
+        for (i, c) in name.chars().enumerate() {
+            if c.is_uppercase() && i > 0 && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        }
+        out
+    };
+    let stem = match ext {
+        "rs" => after(&["fn", "struct", "enum", "trait", "impl", "mod"]).map(|n| snake(&n)),
+        "py" => after(&["class", "def"]).map(|n| snake(&n)),
+        "js" | "ts" | "jsx" | "tsx" => after(&["function", "class", "const"]),
+        "java" | "kt" | "cs" | "swift" => after(&["class", "interface", "enum", "object", "struct"]),
+        "go" => after(&["func", "type"]).map(|n| snake(&n)),
+        "c" | "cpp" => after(&["struct", "class"]).map(|n| snake(&n)),
+        "md" => code.lines().find(|l| l.starts_with('#')).map(|h| slug(h.trim_start_matches('#'))),
+        "html" => Some("index".to_string()),
+        "css" | "scss" => Some("style".to_string()),
+        "sh" | "bat" | "ps1" => Some("script".to_string()),
+        "sql" => Some("query".to_string()),
+        _ => None,
+    };
+    match stem.filter(|s| !s.is_empty()) {
+        Some(s) => format!("{s}.{ext}"),
+        None => format!("snippet-{}.{ext}", n + 1),
+    }
+}
+
+/// `Mein Spiel!` → `mein-spiel` (for file names).
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.trim().to_lowercase().chars() {
+        let mapped = match c {
+            'ä' => "ae".into(),
+            'ö' => "oe".into(),
+            'ü' => "ue".into(),
+            'ß' => "ss".into(),
+            c if c.is_ascii_alphanumeric() => c.to_string(),
+            _ => "-".into(),
+        };
+        if mapped == "-" && (out.is_empty() || out.ends_with('-')) {
+            continue;
+        }
+        out.push_str(&mapped);
+    }
+    out.trim_end_matches('-').chars().take(40).collect::<String>().trim_end_matches('-').to_string()
+}
+
+/// A path the bot suggested: relative, no `..`, sensible characters, with an extension, and no
+/// hidden file other than in `.github/`.
+pub fn valid_path(p: &str) -> bool {
+    looks_like_file(p) && (!p.starts_with('.') || p.starts_with(".github/"))
 }
 
 /// Files for some code blocks of one answer, at their own paths in the repository (inside
@@ -396,9 +485,10 @@ pub fn files_for(blocks: &[(usize, &CodeBlockInfo)], folder: &str) -> Vec<FileOu
         if !content.ends_with('\n') {
             content.push('\n');
         }
-        match out.iter_mut().find(|f| f.path == path) {
+        let unnamed = named_file(b).is_none().then(|| Unnamed { lang: b.lang.clone(), before: b.before.clone() });
+        match out.iter_mut().find(|f| f.path == path && unnamed.is_none()) {
             Some(f) => f.content = content,
-            None => out.push(FileOut { path, content }),
+            None => out.push(FileOut { path, content, unnamed }),
         }
     }
     out
@@ -436,9 +526,9 @@ mod tests {
         assert_eq!(file_name(&block("js", "// src/app.js\nx()", ""), 0), "src/app.js");
         assert_eq!(file_name(&block("html", "<!-- index.html -->\n<p>", ""), 0), "index.html");
         assert_eq!(file_name(&block("python", "print(1)", "Speichere das als spiel.py:"), 0), "spiel.py");
-        assert_eq!(file_name(&block("python", "# Ein Kommentar über das Programm\nx", "Hier ist der Code, z.B. so:"), 2), "code-3.py");
-        assert_eq!(file_name(&block("", "x", "Siehe https://example.com/a.html"), 0), "code-1.txt");
-        assert_eq!(file_name(&block("python", "x", "Datei ../../etc/passwd.py"), 0), "code-1.py");
+        assert_eq!(file_name(&block("python", "# Ein Kommentar über das Programm\nx", "Hier ist der Code, z.B. so:"), 2), "snippet-3.py");
+        assert_eq!(file_name(&block("", "x", "Siehe https://example.com/a.html"), 0), "snippet-1.txt");
+        assert_eq!(file_name(&block("python", "x", "Datei ../../etc/passwd.py"), 0), "snippet-1.py");
     }
 
     /// A tiny stand-in for the GitHub API: answers each request from `routes` (method, path
@@ -498,7 +588,10 @@ mod tests {
             ("POST", "/repos/o/r/git/commits", 201, r#"{"sha":"c2"}"#),
             ("PATCH", "/repos/o/r/git/refs/heads/main", 200, r#"{}"#),
         ]);
-        let files = vec![FileOut { path: "ais-chat/q/main.py".into(), content: "print(1)\n".into() }, FileOut { path: "ais-chat/q/a.css".into(), content: "x\n".into() }];
+        let files = vec![
+            FileOut { path: "ais-chat/q/main.py".into(), content: "print(1)\n".into(), unnamed: None },
+            FileOut { path: "ais-chat/q/a.css".into(), content: "x\n".into(), unnamed: None },
+        ];
         let url = push(&cfg(&api, ""), &files, "msg").unwrap();
         assert!(url.ends_with("/o/r/commit/c2"), "{url}");
         let log: Vec<(String, String, String)> = rx.try_iter().collect();
@@ -522,7 +615,7 @@ mod tests {
             ("GET", "/repos/o/r/git/ref/heads/main", 409, r#"{"message":"Git Repository is empty."}"#),
             ("PUT", "/repos/o/r/contents/ais-chat/main.py", 201, r#"{"commit":{"sha":"c9"}}"#),
         ]);
-        let files = vec![FileOut { path: "ais-chat/main.py".into(), content: "foo".into() }];
+        let files = vec![FileOut { path: "ais-chat/main.py".into(), content: "foo".into(), unnamed: None }];
         let url = push(&cfg(&api, ""), &files, "msg").unwrap();
         assert!(url.ends_with("/o/r/commit/c9"), "{url}");
         let log: Vec<(String, String, String)> = rx.try_iter().collect();
@@ -542,7 +635,7 @@ mod tests {
             ("POST", "/repos/o/r/git/commits", 201, r#"{"sha":"c2"}"#),
             ("PATCH", "/repos/o/r/git/refs/heads/schule", 200, r#"{}"#),
         ]);
-        let files = vec![FileOut { path: "x.py".into(), content: "x".into() }];
+        let files = vec![FileOut { path: "x.py".into(), content: "x".into(), unnamed: None }];
         push(&cfg(&api, "schule"), &files, "msg").unwrap();
         let log: Vec<(String, String, String)> = rx.try_iter().collect();
         let created: Value = serde_json::from_str(&log.iter().find(|l| l.1 == "/repos/o/r/git/refs").unwrap().2).unwrap();
@@ -606,13 +699,38 @@ mod tests {
     }
 
     #[test]
+    fn guesses_names_from_the_code() {
+        let g = |lang: &str, code: &str| guess_name(&block(lang, code, ""), 3);
+        assert_eq!(g("rust", "pub fn load_settings() -> Settings {"), "load_settings.rs");
+        assert_eq!(g("rust", "    /// doc\n    #[serde(skip)]\n    pub github_token: String,"), "snippet-4.rs");
+        assert_eq!(g("rust", "struct GameState {\n}"), "game_state.rs");
+        assert_eq!(g("python", "class Spiel:\n    pass"), "spiel.py");
+        assert_eq!(g("js", "function startGame() {}"), "startGame.js");
+        assert_eq!(g("markdown", "## Mein Spiel!\ntext"), "mein-spiel.md");
+        assert_eq!(g("html", "<p>"), "index.html");
+        assert_eq!(g("bash", "cargo run"), "script.sh");
+        assert_eq!(g("", "text"), "snippet-4.txt");
+    }
+
+    #[test]
+    fn checks_suggested_paths() {
+        assert!(valid_path("src/settings.rs"));
+        assert!(valid_path(".github/workflows/build.yml"));
+        assert!(!valid_path("../etc/passwd.rs"));
+        assert!(!valid_path("/abs/x.rs"));
+        assert!(!valid_path(".env.local"));
+        assert!(!valid_path("settings"));
+    }
+
+    #[test]
     fn files_go_to_their_real_paths() {
         let main = block("rust", "fn main() {}", "Replace src/main.rs with this:");
         let toml = block("toml", "# Cargo.toml\n[package]", "");
         let snippet = block("bash", "git commit -m x", "Then run:");
         let files = files_for(&[(0, &main), (1, &toml), (2, &snippet)], "");
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, ["src/main.rs", "Cargo.toml", "code-3.sh"]);
+        assert_eq!(paths, ["src/main.rs", "Cargo.toml", "script.sh"]);
+        assert!(files[0].unnamed.is_none() && files[2].unnamed.is_some(), "only the unnamed one needs placing");
         assert_eq!(files[0].content, "fn main() {}\n");
         assert_eq!(named_file(&snippet), None, "a snippet without a file name is not a file");
 

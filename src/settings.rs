@@ -16,6 +16,9 @@ pub const DEFAULT_INVITE_LINK: &str =
 
 const DEFAULT_BASE: &str = "https://app.ais-chat.schule";
 
+/// Name of the GitHub token in the system password store.
+const TOKEN_NAME: &str = "github-token";
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -49,6 +52,8 @@ pub struct Settings {
     /// `owner/name`
     pub github_repo: String,
     /// Personal access token (fine-grained, "Contents: Read and write" for the repository).
+    /// Kept in the system password store; written to settings.json only on systems that have
+    /// none (and read from it to move tokens of older versions into the store).
     pub github_token: String,
     /// Empty = the repository's default branch.
     pub github_branch: String,
@@ -245,16 +250,36 @@ impl Settings {
                 let _ = s.apply_invite_link(DEFAULT_INVITE_LINK);
             }
         }
+        if s.github_token.trim().is_empty() {
+            if let Some(t) = crate::secret::load(TOKEN_NAME) {
+                s.github_token = t;
+            }
+        } else {
+            // a token in the file (older version, or no password store last time): move it
+            // into the store and out of the file if that works now
+            let _ = s.save();
+        }
         s
     }
 
+    /// Write settings.json. The GitHub token goes to the system password store; only if
+    /// there is none does it stay in the file (so it is never lost).
     pub fn save(&self) -> Result<()> {
         let p = Self::path().ok_or_else(|| anyhow!("No user config folder on this system."))?;
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("Could not create {}", dir.display()))?;
         }
-        std::fs::write(&p, serde_json::to_string_pretty(self)?).with_context(|| format!("Could not write {}", p.display()))?;
+        let mut on_disk = self.clone();
+        if crate::secret::store(TOKEN_NAME, self.github_token.trim()).is_ok() {
+            on_disk.github_token.clear();
+        }
+        std::fs::write(&p, serde_json::to_string_pretty(&on_disk)?).with_context(|| format!("Could not write {}", p.display()))?;
         Ok(())
+    }
+
+    /// Whether the token is in the system password store (checks by saving it there).
+    pub fn token_is_in_keystore(&self) -> bool {
+        self.github_token.trim().is_empty() || crate::secret::store(TOKEN_NAME, self.github_token.trim()).is_ok()
     }
 }
 
