@@ -7,6 +7,7 @@ mod ais;
 mod app;
 mod markdown;
 mod settings;
+mod theme;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {

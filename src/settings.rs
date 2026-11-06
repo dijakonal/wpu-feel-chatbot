@@ -39,6 +39,8 @@ pub struct Settings {
     // ---- shown in the window
     pub character_name: String,
     pub greeting: String,
+    /// "system" (default), "light" or "dark".
+    pub appearance: String,
 }
 
 impl Settings {

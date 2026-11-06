@@ -2,7 +2,7 @@
 //! italic / strikethrough / inline code, links, bullet and numbered lists, block quotes, tables,
 //! rules and fenced code blocks with a **Copy** button.
 
-use eframe::egui::{self, Color32, FontId, RichText, TextStyle, Ui};
+use eframe::egui::{self, FontId, RichText, TextStyle, Ui};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -238,7 +238,8 @@ fn block(ui: &mut Ui, b: &Block) {
                         Some(s) => format!("{}.", s + n as u64),
                         None => "•".to_string(),
                     };
-                    ui.add_sized([18.0, 0.0], egui::Label::new(RichText::new(marker).strong()));
+                    let accent = crate::theme::of(ui).accent;
+                    ui.add_sized([18.0, 0.0], egui::Label::new(RichText::new(marker).family(crate::theme::bold()).color(accent)));
                     ui.vertical(|ui| {
                         for (j, b) in item.iter().enumerate() {
                             ui.push_id((n, j), |ui| block(ui, b));
@@ -248,7 +249,7 @@ fn block(ui: &mut Ui, b: &Block) {
             }
         }
         Block::Quote(inner) => {
-            let color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+            let color = crate::theme::of(ui).accent.gamma_multiply(0.7);
             egui::Frame::none()
                 .stroke(egui::Stroke::NONE)
                 .inner_margin(egui::Margin { left: 10.0, right: 4.0, top: 2.0, bottom: 2.0 })
@@ -331,13 +332,13 @@ fn inline_items(ui: &mut Ui, items: &[Inline], wrap: bool) {
                             3 => 17.0,
                             _ => 15.0,
                         };
-                        rt = rt.font(FontId::proportional(size)).strong();
+                        rt = rt.font(FontId::new(size, crate::theme::bold())).strong();
                     }
                     if *code {
                         rt = rt.code();
                     }
-                    if *strong {
-                        rt = rt.strong();
+                    if *strong && heading.is_none() && !*code {
+                        rt = rt.family(crate::theme::bold()).strong();
                     }
                     if *italic {
                         rt = rt.italics();
@@ -367,19 +368,24 @@ fn inline_items(ui: &mut Ui, items: &[Inline], wrap: bool) {
 }
 
 fn code_block(ui: &mut Ui, lang: &str, code: &str) {
-    let dark = ui.visuals().dark_mode;
-    let bg = if dark { Color32::from_gray(24) } else { Color32::from_gray(242) };
-    egui::Frame::none().fill(bg).rounding(6.0).inner_margin(8.0).show(ui, |ui| {
+    let p = crate::theme::of(ui);
+    egui::Frame::none()
+        .fill(p.code_bg)
+        .stroke(egui::Stroke::new(1.0_f32, p.border))
+        .rounding(12.0)
+        .inner_margin(egui::Margin { left: 12.0, right: 8.0, top: 6.0, bottom: 10.0 })
+        .show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            ui.label(RichText::new(if lang.is_empty() { "code" } else { lang }).small().weak());
+            ui.label(RichText::new(if lang.is_empty() { "code" } else { lang }).small().color(p.weak));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let id = ui.id().with("copied");
                 let copied_at: Option<f64> = ui.data(|d| d.get_temp(id));
                 let now = ui.input(|i| i.time);
                 let recently = copied_at.map(|t| now - t < 1.5).unwrap_or(false);
                 let label = if recently { "✔ Copied" } else { "📋 Copy" };
-                if ui.small_button(label).on_hover_text("Copy this code to the clipboard").clicked() {
+                let b = egui::Button::new(RichText::new(label).small().color(p.weak)).frame(false);
+                if ui.add(b).on_hover_text("Copy this code to the clipboard").clicked() {
                     ui.ctx().copy_text(code.to_string());
                     ui.data_mut(|d| d.insert_temp(id, now));
                 }

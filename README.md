@@ -4,19 +4,22 @@ A small native desktop chat window (Windows + Linux) for one shared
 [AIS.chat](https://ais-chat.schule) character, written in Rust with
 [egui/eframe](https://github.com/emilk/egui). Answers are streamed in as the
 bot writes them and shown as **Markdown** (headings, lists, tables, quotes, links,
-code blocks with a **Copy** button). The look follows your system's light/dark mode.
+code blocks with a **Copy** button). It has a clean, modern look (Inter font,
+rounded chat bubbles, floating message box) in light and dark mode – it follows the
+system by default, or pick one under **⚙ Settings → Appearance**.
 
 This is an **unofficial** client: it sends the same requests the website's chat
 box sends. AIS.chat "can make mistakes" – check what it tells you.
 
 ## Using it
 
-1. Start the app. It connects to the class chat by itself (the green dot next to
-   the name means it is ready).
-2. Type a message. **Enter** sends, **Shift+Enter** starts a new line.
-3. **📎** (or dragging files onto the window) attaches files.
-4. **➕ New chat** starts over; **■ Stop** stops a long answer; **📋 Copy answer**
-   and the **Copy** button on code blocks put text on the clipboard.
+1. Start the app. It connects to the class chat by itself ("Online" with a green
+   dot under the name means it is ready).
+2. Type a message, or click one of the suggestions on the start screen.
+   **Enter** sends, **Shift+Enter** starts a new line.
+3. **+** in the message box (or dragging files onto the window) attaches files.
+4. **➕ New chat** starts over; the round **■** button stops a long answer;
+   **Copy** under an answer and on code blocks puts text on the clipboard.
 
 There is nothing to set up. To use a *different* shared character, open
 **⚙ Settings**, paste its invite link
@@ -94,7 +97,7 @@ Linux libraries (Debian/Ubuntu names) for building:
 sudo apt install build-essential pkg-config libxkbcommon-dev libwayland-dev libgl1-mesa-dev
 ```
 
-On X11 the app also needs `libxkbcommon-x11-0` at runtime. The **📎** file
+On X11 the app also needs `libxkbcommon-x11-0` at runtime. The **+** file
 picker uses the desktop's file-chooser portal (`xdg-desktop-portal`, present on
 GNOME/KDE desktops); dragging files onto the window always works.
 
@@ -110,6 +113,8 @@ Windows and Linux and uploads the binaries as build artifacts.
 | `src/ais.rs` | the AIS.chat protocol: request body, streamed-answer decoder, file upload, auto-detection |
 | `src/settings.rs` | invite-link parsing, cURL import, loading/saving settings |
 | `src/markdown.rs` | Markdown → egui renderer |
+| `src/theme.rs` | colours (light/dark), fonts, widget style, avatar / send button / typing dots |
+| `assets/fonts/` | Inter (SIL Open Font License, see `Inter-LICENSE.txt`), built into the binary |
 
 ## Tests
 
