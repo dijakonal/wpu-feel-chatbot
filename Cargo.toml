@@ -1,0 +1,23 @@
+[package]
+name = "ais-chat-client"
+version = "0.1.0"
+edition = "2021"
+description = "Small native desktop chat client for a shared AIS.chat character"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dirs = "5"
+eframe = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "multipart"] }
+rfd = "0.15"
+pulldown-cmark = { version = "0.12", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
