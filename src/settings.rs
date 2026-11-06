@@ -58,6 +58,10 @@ pub struct Settings {
     pub github_auto: bool,
     /// Empty = https://api.github.com (GitHub Enterprise: https://host/api/v3).
     pub github_api: String,
+
+    /// Greetings the bot translated (for bots whose greeting the app does not know):
+    /// language code → [original greeting, translation].
+    pub greeting_translations: std::collections::BTreeMap<String, [String; 2]>,
 }
 
 /// Answer languages: (code, name in the language itself, English name).
@@ -100,6 +104,32 @@ impl Settings {
             "/" => String::new(),
             f => f.trim_matches('/').to_string(),
         }
+    }
+
+    /// The greeting shown at the start of a chat, in the answer language if one is chosen and
+    /// a translation is known; otherwise the bot's own greeting. Empty if the bot has none.
+    pub fn displayed_greeting(&self) -> String {
+        let lang = self.language.trim();
+        if language(lang).is_some() {
+            if let Some(g) = crate::i18n::known_greeting(&self.greeting, lang) {
+                return g.to_string();
+            }
+            if let Some([source, translated]) = self.greeting_translations.get(lang) {
+                if *source == self.greeting {
+                    return translated.clone();
+                }
+            }
+        }
+        self.greeting.clone()
+    }
+
+    /// The bot has to be asked for a translation of its greeting.
+    pub fn greeting_needs_translation(&self) -> bool {
+        let lang = self.language.trim();
+        language(lang).is_some()
+            && !self.greeting.trim().is_empty()
+            && crate::i18n::known_greeting(&self.greeting, lang).is_none()
+            && self.greeting_translations.get(lang).map_or(true, |[source, _]| *source != self.greeting)
     }
 
     /// The hidden note put in front of the newest message so the bot answers in the chosen
@@ -273,6 +303,24 @@ fn header_value(curl: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn greeting_follows_the_language() {
+        let mut s = Settings { greeting: crate::i18n::CLASS_GREETING.into(), ..Default::default() };
+        assert_eq!(s.displayed_greeting(), crate::i18n::CLASS_GREETING, "automatic = the bot's own");
+        s.language = "en".into();
+        assert_eq!(s.displayed_greeting(), "Hello, how can I help you with coding?");
+        assert!(!s.greeting_needs_translation());
+
+        s.greeting = "Hallo, ich bin der Geschichts-Bot.".into();
+        assert_eq!(s.displayed_greeting(), "Hallo, ich bin der Geschichts-Bot.", "unknown until translated");
+        assert!(s.greeting_needs_translation());
+        s.greeting_translations.insert("en".into(), [s.greeting.clone(), "Hi, I am the history bot.".into()]);
+        assert_eq!(s.displayed_greeting(), "Hi, I am the history bot.");
+        assert!(!s.greeting_needs_translation());
+        s.greeting = "Neuer Gruß".into();
+        assert_eq!(s.displayed_greeting(), "Neuer Gruß", "a translation of an old greeting is not used");
+    }
 
     #[test]
     fn reads_invite_link() {

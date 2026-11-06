@@ -1042,6 +1042,29 @@ mod tests {
         assert!(!l.contains("note"), "mentions the note: {text}");
     }
 
+    /// `cargo test -- --ignored live_` : the bot translates an unknown greeting cleanly.
+    #[test]
+    #[ignore]
+    fn live_greeting_translation() {
+        let mut s = Settings::default();
+        s.apply_invite_link(crate::settings::DEFAULT_INVITE_LINK).unwrap();
+        refresh(&mut s).expect("setup");
+        s.language = "fr".into();
+        let source = "Hallo! Ich bin dein Geschichts-Assistent. Was möchtest du heute lernen?";
+        let msgs = vec![ChatMessage::user(&crate::i18n::translation_request(source, "French"))];
+        let mut reply = String::new();
+        stream_reply(&s, build_body(&s, &msgs, &new_session_id()), |ev| {
+            if let Event::Text(t) = ev {
+                reply.push_str(t)
+            }
+        })
+        .expect("reply");
+        let text = crate::i18n::clean_translation(&reply, source);
+        println!("translation: {text:?}");
+        let t = text.expect("usable translation").to_lowercase();
+        assert!(t.contains("bonjour") || t.contains("salut"), "{t}");
+    }
+
     #[test]
     fn finds_deployment_id() {
         let html = r#"<meta name="baggage" content="sentry-environment=production,sentry-release=72251121fc13034b,sentry-public_key=x">"#;

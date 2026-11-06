@@ -27,6 +27,10 @@ box sends. AIS.chat "can make mistakes" – check what it tells you.
    The app puts a short note in front of your newest message in the request –
    it is not shown in the window and not kept in the chat history, so a change
    applies from the next message on. *Automatic* sends no note.
+   The start screen follows the language too: the bot's greeting and the
+   suggestion cards switch to it in chats that have not started yet. The class
+   bot's greeting is translated by the app itself; for other bots the app asks
+   the bot once to translate its greeting and remembers the result.
 6. **Several chats:** the list on the left (☰ hides it) holds all your chats,
    newest first. Each one has its own context – its own AIS.chat session,
    history, uploads and unsent draft – so the bot never mixes them up. An answer
@@ -157,6 +161,7 @@ Windows and Linux and uploads the binaries as build artifacts.
 | `src/ais.rs` | the AIS.chat protocol: request body, streamed-answer decoder, file upload, auto-detection |
 | `src/conversations.rs` | one chat's state, titles, saving/loading the chat list |
 | `src/github.rs` | optional GitHub saving: file names, one commit per push (GitHub REST API) |
+| `src/i18n.rs` | greeting and suggestion cards in the answer language |
 | `src/settings.rs` | invite-link parsing, cURL import, loading/saving settings |
 | `src/markdown.rs` | Markdown → egui renderer |
 | `src/theme.rs` | colours (light/dark), fonts, widget style, avatar / send button / typing dots |

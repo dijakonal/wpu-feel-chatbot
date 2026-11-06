@@ -31,6 +31,8 @@ enum Msg {
     Pushed { keys: Vec<String>, result: Result<String, String> },
     /// "Check access" in Settings finished.
     GithubChecked(Result<String, String>),
+    /// The bot translated its greeting (`None`: it did not work).
+    GreetingTranslated { lang: String, source: String, text: Option<String> },
     // `conv` = id of the chat the work belongs to (it may no longer be the open one)
     Uploaded { conv: String, id: u64, result: Result<String, String> },
     Text { conv: String, gen: u64, text: String },
@@ -75,6 +77,8 @@ pub struct App {
     connecting_from_settings: bool,
     github_note: Option<(bool, String)>,
     github_checking: bool,
+    /// Language whose greeting translation is being fetched.
+    translating: Option<String>,
     /// GitHub state of code blocks, by `<message id>#<n>`.
     push_states: std::collections::HashMap<String, PushState>,
 
@@ -111,6 +115,7 @@ impl App {
             connecting_from_settings: false,
             github_note: None,
             github_checking: false,
+            translating: None,
             push_states: Default::default(),
             tx,
             rx,
@@ -274,7 +279,36 @@ impl App {
     }
 
     fn greeting(&self) -> String {
-        if self.settings.greeting.trim().is_empty() { FALLBACK_GREETING.to_string() } else { self.settings.greeting.clone() }
+        let g = self.settings.displayed_greeting();
+        if g.trim().is_empty() { FALLBACK_GREETING.to_string() } else { g }
+    }
+
+    /// For a bot whose greeting the app cannot translate itself: ask the bot once (in a
+    /// separate session that no chat uses) and keep the answer in the settings.
+    fn translate_greeting_if_needed(&mut self) {
+        let lang = self.settings.language.trim().to_string();
+        if !self.settings.greeting_needs_translation() || !self.settings.is_ready() || self.translating.as_deref() == Some(lang.as_str()) {
+            return;
+        }
+        let Some((_, english)) = crate::settings::language(&lang) else { return };
+        self.translating = Some(lang.clone());
+        let s = self.settings.clone();
+        let source = s.greeting.clone();
+        let request = crate::i18n::translation_request(&source, english);
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let msgs = vec![ChatMessage::user(&request)];
+            let mut reply = String::new();
+            let ok = ais::stream_reply(&s, ais::build_body(&s, &msgs, &ais::new_session_id()), |ev| {
+                if let Event::Text(t) = ev {
+                    reply.push_str(t);
+                }
+            });
+            let text = ok.ok().and_then(|_| crate::i18n::clean_translation(&reply, &source));
+            let _ = tx.send(Msg::GreetingTranslated { lang, source, text });
+            ctx.request_repaint();
+        });
     }
 
     /// Open an empty chat: reuse one that is still empty, otherwise start a new one.
@@ -328,11 +362,17 @@ impl App {
     }
 
     fn apply_settings(&mut self, s: Settings) {
-        let greeting_changed = s.greeting != self.settings.greeting;
+        let before = self.greeting();
         self.settings = s;
         let _ = self.settings.save();
-        if greeting_changed {
-            let g = self.greeting();
+        self.refresh_greetings(&before);
+        self.translate_greeting_if_needed();
+    }
+
+    /// Chats that have not started yet show the current greeting (bot or language changed).
+    fn refresh_greetings(&mut self, before: &str) {
+        let g = self.greeting();
+        if g != before {
             for c in &mut self.convs {
                 c.set_greeting(&g);
             }
@@ -375,6 +415,17 @@ impl App {
                     };
                     for k in keys {
                         self.push_states.insert(k, state.clone());
+                    }
+                }
+                Msg::GreetingTranslated { lang, source, text } => {
+                    if self.translating.as_deref() == Some(lang.as_str()) {
+                        self.translating = None;
+                    }
+                    if let Some(text) = text {
+                        let before = self.greeting();
+                        self.settings.greeting_translations.insert(lang, [source, text]);
+                        let _ = self.settings.save();
+                        self.refresh_greetings(&before);
                     }
                 }
                 Msg::GithubChecked(result) => {
@@ -993,15 +1044,10 @@ impl App {
             ui.label(RichText::new("Ask a question, paste code, or attach files with + or by dragging them in.").color(p.weak));
             ui.add_space(10.0);
         });
-        const IDEAS: [&str; 4] = [
-            "Erkläre mir diesen Code Schritt für Schritt",
-            "Hilf mir, meine App-Idee zu planen",
-            "Finde den Fehler in meinem Programm",
-            "Schreib mir ein kleines Python-Spiel",
-        ];
+        let ideas = crate::i18n::suggestions(self.settings.language.trim());
         let mut picked = None;
         let cols = if ui.available_width() > 520.0 { 2 } else { 1 };
-        for row in IDEAS.chunks(cols) {
+        for row in ideas.chunks(cols) {
             ui.columns(cols, |columns| {
                 for (col, idea) in columns.iter_mut().zip(row) {
                     let w = col.available_width();

@@ -7,6 +7,7 @@ mod ais;
 mod app;
 mod conversations;
 mod github;
+mod i18n;
 mod markdown;
 mod settings;
 mod theme;
