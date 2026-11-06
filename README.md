@@ -82,7 +82,7 @@ message that is only files.
   "Reading the attached file…".
 
 Uploaded files are listed again with every message of the chat, because the
-history is re-sent every time as well. **New chat** forgets them.
+history is re-sent every time as well. They belong to their chat: a new chat starts without them.
 
 ## If something does not work
 
