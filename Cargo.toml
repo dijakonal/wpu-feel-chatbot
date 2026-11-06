@@ -1,8 +1,27 @@
 [package]
 name = "ais-chat-client"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Small native desktop chat client for a shared AIS.chat character"
+repository = "https://github.com/dijakonal/wpu-feel-chatbot"
+
+# `cargo deb` builds the .deb package (Debian, Ubuntu, Mint, …)
+[package.metadata.deb]
+maintainer = "dijakonal <https://github.com/dijakonal>"
+copyright = "dijakonal"
+section = "education"
+priority = "optional"
+extended-description = """\
+Native desktop chat window for one shared AIS.chat character: streamed Markdown
+answers, several chats, file attachments, answer language, optional GitHub
+integration. Unofficial client."""
+# libxkbcommon-x11 is loaded at runtime (not linked), so $auto cannot see it
+depends = "$auto, libxkbcommon-x11-0"
+assets = [
+    ["target/release/ais-chat-client", "usr/bin/", "755"],
+    ["pkg/ais-chat-client.desktop", "usr/share/applications/", "644"],
+    ["assets/icon.png", "usr/share/icons/hicolor/512x512/apps/ais-chat-client.png", "644"],
+]
 
 [dependencies]
 anyhow = "1"

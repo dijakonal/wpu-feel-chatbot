@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.1 – 2026-11-06
+
+**New downloads for Linux**
+- **AppImage** – one file that runs on most distributions without installing:
+  download, make it executable (`chmod +x`, or *Properties → Allow executing*),
+  double-click.
+- **.deb** for Debian, Ubuntu and Linux Mint – installs the app into the menu:
+  `sudo apt install ./ais-chat-client_1.0.1_amd64.deb`
+- the plain program file `ais-chat-client-linux-x86_64`
+- The Linux files now also run on older systems (Ubuntu 22.04, Debian 12,
+  Linux Mint 21 and newer).
+
+**Other**
+- New app icon (the ais.chat logo) for the window, the menu and the AppImage.
+
+Windows: `ais-chat-client-windows-x86_64.exe` (Windows may warn that the app is
+from an unknown publisher – click *More info → Run anyway*).
+
 ## 1.0.0 – 2026-11-06
 
 First release of the AIS.chat desktop client.

@@ -18,8 +18,14 @@ Get the newest version from the
 
 - **Windows:** `ais-chat-client-windows-x86_64.exe` – just start it. Windows may
   say the app is from an unknown publisher: click *More info → Run anyway*.
-- **Linux:** `ais-chat-client-linux-x86_64.tar.gz` – unpack it and run
-  `./ais-chat-client` (on X11 it needs `libxkbcommon-x11-0`, see below).
+- **Linux** (Ubuntu 22.04, Debian 12, Linux Mint 21 or newer – or any distribution
+  via the AppImage):
+  - `ais-chat-client-linux-x86_64.AppImage` – no installation: make it executable
+    (`chmod +x`, or *Properties → Allow executing*) and double-click it.
+  - `ais-chat-client_<version>_amd64.deb` – Debian/Ubuntu/Mint, adds the app to
+    the menu: `sudo apt install ./ais-chat-client_<version>_amd64.deb`
+  - `ais-chat-client-linux-x86_64` (the plain program) or the same in a `.tar.gz` –
+    run it directly (on X11 it needs `libxkbcommon-x11-0`, see below).
 
 To build it yourself, see [Build & run](#build--run).
 

@@ -19,7 +19,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # the oldest supported Ubuntu: the Linux files then also run on Ubuntu 22.04,
+          # Debian 12, Linux Mint 21 and newer (glibc 2.35)
+          - os: ubuntu-22.04
             artifact: ais-chat-client-linux
           - os: windows-latest
             artifact: ais-chat-client-windows
@@ -31,7 +33,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+          sudo apt-get install -y build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libgl1-mesa-dev
+
+      - name: cargo-deb
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -45,10 +53,27 @@ jobs:
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        # tar keeps the "executable" permission
         run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           mkdir dist
+          # the plain program, and a .tar.gz (keeps the "executable" permission)
+          cp target/release/ais-chat-client dist/ais-chat-client-linux-x86_64
           tar -czf dist/ais-chat-client-linux-x86_64.tar.gz -C target/release ais-chat-client
+          # .deb with menu entry and icon (see [package.metadata.deb] in Cargo.toml)
+          cargo deb --no-build --output "dist/ais-chat-client_${version}_amd64.deb"
+          # AppImage: one file that runs on most distributions; libxkbcommon-x11 is loaded at
+          # runtime, so it is bundled explicitly
+          curl -sSLo linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy
+          cp assets/icon.png ais-chat-client.png
+          APPIMAGE_EXTRACT_AND_RUN=1 LDAI_OUTPUT=dist/ais-chat-client-linux-x86_64.AppImage ./linuxdeploy \
+            --appdir AppDir \
+            --executable target/release/ais-chat-client \
+            --desktop-file pkg/ais-chat-client.desktop \
+            --icon-file ais-chat-client.png \
+            --library /usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0 \
+            --output appimage
+          ls -la dist
 
       - name: Package (Windows)
         if: runner.os == 'Windows'

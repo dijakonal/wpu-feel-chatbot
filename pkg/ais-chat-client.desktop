@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=AIS.chat Client
+GenericName=AI chat
+Comment=Chat with the shared AIS.chat class assistant
+Exec=ais-chat-client
+Icon=ais-chat-client
+Terminal=false
+Categories=Education;ComputerScience;
+Keywords=AI;chat;AIS;coding;school;
+StartupWMClass=ais-chat-client
