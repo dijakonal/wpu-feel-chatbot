@@ -1,0 +1,1 @@
+keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
