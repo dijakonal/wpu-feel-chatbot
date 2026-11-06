@@ -44,6 +44,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # one cache per runner image: C parts (e.g. the vendored D-Bus) compiled on a newer
+          # Ubuntu do not link on an older one
+          key: ${{ matrix.os }}
 
       - name: Test
         run: cargo test --locked
