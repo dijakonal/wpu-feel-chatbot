@@ -190,20 +190,42 @@ pub(crate) fn http_client(s: &Settings) -> Result<Client> {
         .build()?)
 }
 
-fn describe_http_error(status: reqwest::StatusCode, body: &str) -> String {
-    let snippet: String = body.chars().take(200).collect();
-    if status == reqwest::StatusCode::NOT_FOUND || body.contains("Server Action") {
-        "AIS.chat does not recognise the saved request values. It was probably updated. \
-         Open Settings and import a fresh cURL (or try Auto-detect)."
-            .to_string()
-    } else {
-        format!("The chat service answered HTTP {status}. {snippet}")
+/// AIS.chat was updated and the saved `next-action` / deployment id no longer work. The app
+/// reacts to this by reading fresh values from the site and sending again.
+#[derive(Debug)]
+pub struct SiteChanged(pub String);
+
+impl std::fmt::Display for SiteChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
-/// Send the conversation and stream the answer. `on_text` is called for every piece of text.
+impl std::error::Error for SiteChanged {}
+
+pub fn is_site_changed(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<SiteChanged>().is_some()
+}
+
+fn describe_http_error(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    let snippet: String = body.chars().take(200).collect();
+    if status == reqwest::StatusCode::NOT_FOUND || body.contains("Server Action") {
+        anyhow::Error::new(SiteChanged(
+            "AIS.chat does not recognise the saved request values (the site was probably updated).".into(),
+        ))
+    } else if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
+        anyhow!("AIS.chat refused the request (HTTP {status}). Is the invite link still valid? Check it in Settings.")
+    } else if status.as_u16() == 429 {
+        anyhow!("AIS.chat says there are too many requests right now. Wait a moment and try again.")
+    } else {
+        anyhow!("The chat service answered HTTP {status}. {snippet}")
+    }
+}
+
+/// Send the conversation and stream the answer. `on_event` gets every piece of text
+/// ([`Event::Text`]) and every status update ([`Event::Activity`]).
 /// Returns the server's id for the new assistant message, if it sent one.
-pub fn stream_reply(s: &Settings, body: String, mut on_text: impl FnMut(&str)) -> Result<Option<String>> {
+pub fn stream_reply(s: &Settings, body: String, mut on_event: impl FnMut(&Event)) -> Result<Option<String>> {
     let http = http_client(s)?;
     let url = s.dialog_url();
 
@@ -218,12 +240,12 @@ pub fn stream_reply(s: &Settings, body: String, mut on_text: impl FnMut(&str)) -
     if !s.deployment_id.trim().is_empty() {
         req = req.header("x-deployment-id", s.deployment_id.trim());
     }
-    let mut resp = req.body(body).send()?;
+    let mut resp = req.body(body).send().map_err(friendly_network_error)?;
 
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().unwrap_or_default();
-        return Err(anyhow!(describe_http_error(status, &text)));
+        return Err(describe_http_error(status, &text));
     }
 
     let mut parser = FlightParser::default();
@@ -234,28 +256,134 @@ pub fn stream_reply(s: &Settings, body: String, mut on_text: impl FnMut(&str)) -
         let n = resp.read(&mut buf)?;
         let events = if n == 0 { parser.finish() } else { parser.feed(&buf[..n]) };
         for ev in events {
-            match ev {
-                Event::Text(t) => {
-                    got_text = true;
-                    on_text(&t);
-                }
-                Event::Error(e) => errors.push(e),
-                Event::Done => {}
+            match &ev {
+                Event::Text(_) => got_text = true,
+                Event::Error(e) => errors.push(e.clone()),
+                Event::Activity(_) | Event::Done => {}
             }
+            on_event(&ev);
         }
         if n == 0 {
             break;
         }
     }
     if !got_text {
-        return Err(anyhow!(match errors.first() {
-            Some(e) => format!("The chat service returned an error: {e}"),
-            None => "Empty reply from the chat service. If this keeps happening, AIS.chat may have \
-                     been updated: re-import a fresh cURL in Settings."
-                .to_string(),
-        }));
+        return Err(match errors.first() {
+            Some(e) => anyhow!("The chat service returned an error: {e}"),
+            None => anyhow::Error::new(SiteChanged("Empty reply from the chat service.".into())),
+        });
     }
     Ok(parser.message_id)
+}
+
+fn friendly_network_error(e: reqwest::Error) -> anyhow::Error {
+    if e.is_connect() || e.is_timeout() {
+        anyhow!("Could not reach AIS.chat. Check the internet connection and try again.")
+    } else {
+        anyhow::Error::new(e)
+    }
+}
+
+// ------------------------------------------------------------------ file upload
+
+/// Largest file the app will upload.
+pub const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+
+/// Upload one file the way the website's paperclip button does and return the file id that goes
+/// into the chat request's `fileIds`. `session_id` must be the chat's `sharedSessionId`.
+pub fn upload_file(s: &Settings, name: &str, bytes: Vec<u8>, session_id: &str) -> Result<String> {
+    use reqwest::blocking::multipart::{Form, Part};
+
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return Err(anyhow!("{name} is larger than {} MB.", MAX_UPLOAD_BYTES / 1024 / 1024));
+    }
+    let part = Part::bytes(bytes).file_name(name.to_string()).mime_str(mime_for(name))?;
+    let form = Form::new()
+        .part("file", part)
+        .text("inviteCode", s.invite_code.trim().to_string())
+        .text("entityType", "character")
+        .text("entityId", s.character_id.trim().to_string())
+        .text("sharedSessionId", session_id.to_string());
+
+    let resp = http_client(s)?
+        .post(s.upload_endpoint())
+        .header("Origin", s.base())
+        .header("Referer", s.dialog_url())
+        .multipart(form)
+        .send()
+        .map_err(friendly_network_error)?;
+    let status = resp.status();
+    let text = resp.text().unwrap_or_default();
+    if status.as_u16() == 413 {
+        return Err(anyhow!("AIS.chat says {name} is too large."));
+    }
+    if !status.is_success() {
+        let snippet: String = text.chars().take(160).collect();
+        return Err(anyhow!("Uploading {name} failed (HTTP {status}). {snippet}"));
+    }
+    parse_upload_reply(&text).ok_or_else(|| anyhow!("Uploading {name}: AIS.chat sent an answer without a file id."))
+}
+
+/// The upload answers `{"body":"{\"fileId\":\"file_…\"}","status":200}`. Also accepts the id
+/// directly in the object and the `file_id` spelling.
+pub fn parse_upload_reply(text: &str) -> Option<String> {
+    fn id_in(v: &Value) -> Option<String> {
+        for k in ["fileId", "file_id", "id"] {
+            if let Some(id) = v.get(k).and_then(Value::as_str) {
+                return Some(id.to_string());
+            }
+        }
+        None
+    }
+    let v: Value = serde_json::from_str(text).ok()?;
+    if let Some(inner) = v.get("body") {
+        let inner = match inner {
+            Value::String(s) => serde_json::from_str::<Value>(s).ok()?,
+            other => other.clone(),
+        };
+        if let Some(id) = id_in(&inner) {
+            return Some(id);
+        }
+    }
+    id_in(&v)
+}
+
+/// Content type for an upload, from the file extension.
+pub fn mime_for(name: &str) -> &'static str {
+    let ext = std::path::Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "doc" => "application/msword",
+        "xls" => "application/vnd.ms-excel",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "csv" => "text/csv",
+        "md" | "markdown" => "text/markdown",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        _ if is_text_name(name) => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Files that can be pasted into the message as text if uploading is not possible.
+pub fn is_text_name(name: &str) -> bool {
+    const TEXT: &[&str] = &[
+        "txt", "md", "markdown", "csv", "tsv", "json", "xml", "yaml", "yml", "toml", "ini", "cfg", "log", "py", "rs",
+        "js", "ts", "jsx", "tsx", "java", "kt", "c", "h", "cpp", "hpp", "cs", "go", "rb", "php", "swift", "html", "htm",
+        "css", "scss", "sql", "sh", "bat", "ps1", "lua", "r", "m", "ino", "pde", "gd", "vue", "svelte",
+    ];
+    let ext = std::path::Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    TEXT.contains(&ext.as_str())
 }
 
 // ------------------------------------------------------------------ streamed reply decoding
@@ -263,8 +391,50 @@ pub fn stream_reply(s: &Settings, body: String, mut on_text: impl FnMut(&str)) -
 #[derive(Debug, PartialEq)]
 pub enum Event {
     Text(String),
+    /// What the bot is doing right now (e.g. "Reading the attached file…"); empty = finished.
+    Activity(String),
     Done,
     Error(String),
+}
+
+/// AIS.chat mixes status rows like `{"type":"ai_activity","steps":[…]}` into the text stream.
+/// Returns `Some(status)` for those (empty when all steps are done) and `None` for real text.
+fn activity_status(chunk: &str) -> Option<String> {
+    // the rows start with an ASCII record separator (0x1E), which `trim` does not remove
+    let t = chunk.trim_matches(|c: char| c.is_whitespace() || c == '\u{1e}');
+    if !t.starts_with('{') || !t.contains("\"ai_activity\"") {
+        return None;
+    }
+    let v: Value = serde_json::from_str(t).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("ai_activity") {
+        return None;
+    }
+    let steps = v.get("steps").and_then(Value::as_array).cloned().unwrap_or_default();
+    if steps.iter().any(|s| s.get("kind").and_then(Value::as_str) == Some("done")) {
+        return Some(String::new());
+    }
+    let tool = steps.iter().rev().find_map(|s| s.get("tool").and_then(Value::as_str)).unwrap_or("");
+    let l = tool.to_lowercase();
+    Some(
+        if l.contains("file") {
+            "Reading the attached file…".to_string()
+        } else if l.contains("search") || l.contains("web") {
+            "Searching the web…".to_string()
+        } else if l.contains("image") {
+            "Looking at the image…".to_string()
+        } else if tool.is_empty() {
+            "Thinking…".to_string()
+        } else {
+            format!("Working ({tool})…")
+        },
+    )
+}
+
+fn text_event(text: String) -> Event {
+    match activity_status(&text) {
+        Some(status) => Event::Activity(status),
+        None => Event::Text(text),
+    }
 }
 
 /// Decoder for the React Flight rows AIS.chat sends:
@@ -354,7 +524,7 @@ impl FlightParser {
                         // truncated reply: keep what arrived
                         let text = String::from_utf8_lossy(&self.buf[comma + 1..]).to_string();
                         if self.is_stream(&id) && !text.is_empty() {
-                            events.push(Event::Text(text));
+                            events.push(text_event(text));
                         }
                         self.buf.clear();
                     }
@@ -363,7 +533,7 @@ impl FlightParser {
                 let text = String::from_utf8_lossy(&self.buf[comma + 1..end]).to_string();
                 self.buf.drain(..end);
                 if self.is_stream(&id) {
-                    events.push(Event::Text(text));
+                    events.push(text_event(text));
                 }
                 continue;
             }
@@ -417,6 +587,8 @@ pub struct Detected {
     pub deployment_id: Option<String>,
     /// (server action id, function name if the bundle reveals it)
     pub actions: Vec<(String, Option<String>)>,
+    pub character_name: Option<String>,
+    pub greeting: Option<String>,
 }
 
 /// The page's `<meta name="baggage">` carries `sentry-release=<id>`, which equals the deployment id.
@@ -427,17 +599,14 @@ pub fn deployment_from_html(html: &str) -> Option<String> {
     if id.len() >= 7 { Some(id) } else { None }
 }
 
-pub fn fetch_deployment_id(s: &Settings) -> Result<Option<String>> {
-    let html = http_client(s)?.get(s.dialog_url()).send()?.error_for_status()?.text()?;
-    Ok(deployment_from_html(&html))
-}
-
 /// Best effort: reads the page and its JavaScript chunks to find the current deployment id and
 /// server action id(s).
 pub fn detect(s: &Settings) -> Result<Detected> {
     let client = http_client(s)?;
     let html = client.get(s.dialog_url()).send()?.error_for_status()?.text()?;
     let deployment_id = deployment_from_html(&html);
+    let character_name = character_name_from_html(&html);
+    let greeting = page_string_field(&html, "initialMessage");
 
     let mut actions: Vec<(String, Option<String>)> = Vec::new();
     for url in chunk_urls(&html, &s.base()).into_iter().take(60) {
@@ -449,26 +618,105 @@ pub fn detect(s: &Settings) -> Result<Detected> {
             }
         }
     }
-    Ok(Detected { deployment_id, actions })
+    Ok(Detected { deployment_id, actions, character_name, greeting })
 }
 
-/// Pick the server action that looks like "send a chat message".
+/// Read everything needed from the site and store it in `s`. Returns a short summary for the
+/// status line. Used on first start, from Settings, and automatically when the site was updated.
+pub fn refresh(s: &mut Settings) -> Result<String> {
+    if !s.is_linked() {
+        return Err(anyhow!("Paste the invite link in Settings first."));
+    }
+    let d = detect(s).map_err(|e| match e.downcast_ref::<reqwest::Error>() {
+        Some(r) if r.status() == Some(reqwest::StatusCode::NOT_FOUND) => {
+            anyhow!("AIS.chat does not know this invite link. Check it in Settings.")
+        }
+        Some(r) if r.is_connect() || r.is_timeout() => anyhow!("Could not reach AIS.chat. Check the internet connection."),
+        _ => e,
+    })?;
+    let action = choose_action(&d.actions).ok_or_else(|| {
+        anyhow!("Could not find the chat function on the AIS.chat page. Use \"Import cURL\" under Settings → Advanced.")
+    })?;
+    s.next_action = action;
+    if let Some(dep) = d.deployment_id {
+        s.deployment_id = dep;
+    }
+    if let Some(n) = d.character_name {
+        s.character_name = n;
+    }
+    if let Some(g) = d.greeting {
+        s.greeting = g;
+    }
+    Ok(format!("Connected to {}.", s.display_name()))
+}
+
+/// Pick the server action that sends a message to a shared character. The page also contains
+/// actions for other chat kinds, so "character" wins over the general hints.
 pub fn choose_action(actions: &[(String, Option<String>)]) -> Option<String> {
     if actions.len() == 1 {
         return Some(actions[0].0.clone());
     }
+    let named = |pred: &dyn Fn(&str) -> bool| {
+        actions
+            .iter()
+            .find(|(_, name)| name.as_deref().map(|n| pred(&n.to_lowercase())).unwrap_or(false))
+            .map(|(id, _)| id.clone())
+    };
     let hints = ["chat", "dialog", "message", "send", "stream", "generate", "reply"];
-    actions
-        .iter()
-        .find(|(_, name)| {
-            name.as_ref()
-                .map(|n| {
-                    let l = n.to_lowercase();
-                    hints.iter().any(|h| l.contains(h))
-                })
-                .unwrap_or(false)
-        })
-        .map(|(id, _)| id.clone())
+    named(&|n| n.contains("character") && n.contains("message"))
+        .or_else(|| named(&|n| n.contains("send") && n.contains("message") && !n.contains("learning")))
+        .or_else(|| named(&|n| hints.iter().any(|h| n.contains(h))))
+}
+
+/// The page embeds the character as escaped JSON inside a script tag; its `name` is the last
+/// one before `instructions`.
+pub fn character_name_from_html(html: &str) -> Option<String> {
+    let anchor = html.find("\\\"instructions\\\":")?;
+    let key = "\\\"name\\\":\\\"";
+    let start = html[..anchor].rfind(key)? + key.len();
+    decode_page_string(&html[start..]).filter(|n| !n.trim().is_empty())
+}
+
+/// Value of a string field (`\"field\":\"…\"`) in the page's embedded data.
+pub fn page_string_field(html: &str, field: &str) -> Option<String> {
+    let key = format!("\\\"{field}\\\":\\\"");
+    let start = html.find(&key)? + key.len();
+    decode_page_string(&html[start..]).filter(|g| !g.trim().is_empty())
+}
+
+/// Decode a JSON string that is itself inside a JS string literal, starting right after its
+/// opening quote. Undoes both escape levels.
+fn decode_page_string(s: &str) -> Option<String> {
+    let mut level1 = String::new();
+    let mut chars = s.chars();
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        // undo the outer (JS literal) escaping
+        let c = if c == '\\' {
+            match chars.next()? {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
+                }
+                other => other,
+            }
+        } else {
+            c
+        };
+        // inner JSON string
+        if c == '"' && !escaped {
+            return serde_json::from_str::<String>(&format!("\"{level1}\"")).ok();
+        }
+        escaped = c == '\\' && !escaped;
+        level1.push(c);
+        if level1.len() > 20_000 {
+            return None;
+        }
+    }
+    None
 }
 
 fn chunk_urls(html: &str, base: &str) -> Vec<String> {
@@ -617,6 +865,90 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].1.as_deref(), Some("sendMessage"));
         assert_eq!(choose_action(&found).as_deref(), Some("40468826f02e7c5404dc45e562ad6c0df1e8874951"));
+    }
+
+    #[test]
+    fn activity_rows_are_not_text() {
+        // real capture of a reply to a message with an uploaded file (byte lengths must stay exact)
+        let sample = "0:{\"a\":\"$@1\",\"q\":\"?inviteCode=RVHN1H1B\",\"i\":false}\n2:R\n1:{\"stream\":\"$2\",\"messageId\":\"904e5bcd-f867-44ba-8c4e-77de85c51aa7\"}\n2:T7a,\u{1e}{\"type\":\"ai_activity\",\"steps\":[{\"kind\":\"tool\",\"id\":\"toolu_vrtx_01M1sEp5z5RsAhUcYYwcFQuE\",\"tool\":\"retrieve_entire_file\"}]}2:T11,The file says: \"h2:T17,ello from upload test\".2:T8a,\u{1e}{\"type\":\"ai_activity\",\"steps\":[{\"kind\":\"tool\",\"id\":\"toolu_vrtx_01M1sEp5z5RsAhUcYYwcFQuE\",\"tool\":\"retrieve_entire_file\"},{\"kind\":\"done\"}]}2:C\n";
+        for chunk in [1, 3, 4096] {
+            let mut p = FlightParser::default();
+            let mut events = Vec::new();
+            for part in sample.as_bytes().chunks(chunk) {
+                events.extend(p.feed(part));
+            }
+            events.extend(p.finish());
+            let text: String = events.iter().filter_map(|e| if let Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
+            assert_eq!(text, "The file says: \"hello from upload test\".", "chunk size {chunk}");
+            assert_eq!(events[0], Event::Activity("Reading the attached file…".into()));
+            assert!(events.contains(&Event::Activity(String::new())));
+        }
+    }
+
+    #[test]
+    fn reads_upload_reply() {
+        let real = r#"{"body":"{\"fileId\":\"file_Gv0E7W11BnzTcvc5s457OBcN\"}","status":200}"#;
+        assert_eq!(parse_upload_reply(real).as_deref(), Some("file_Gv0E7W11BnzTcvc5s457OBcN"));
+        assert_eq!(parse_upload_reply(r#"{"body":"{\"file_id\":\"f2\"}"}"#).as_deref(), Some("f2"));
+        assert_eq!(parse_upload_reply(r#"{"fileId":"f3"}"#).as_deref(), Some("f3"));
+        assert_eq!(parse_upload_reply("<html>"), None);
+    }
+
+    #[test]
+    fn prefers_character_action() {
+        let actions = vec![
+            ("a".repeat(42), Some("sendChatMessageAction".to_string())),
+            ("b".repeat(42), Some("sendLearningScenarioMessageAction".to_string())),
+            ("c".repeat(42), Some("sendCharacterMessageAction".to_string())),
+            ("d".repeat(42), Some("updateUserSettingsAction".to_string())),
+        ];
+        assert_eq!(choose_action(&actions), Some("c".repeat(42)));
+    }
+
+    #[test]
+    fn reads_name_and_greeting_from_page() {
+        let html = r#"x\"id\":\"6d16\",\"name\":\"VibeCoding-Assitent für WPU-FEEL\",\"description\":\"d\",\"instructions\":\"ROLLE\\nDu\",\"initialMessage\":\"Hallo, \\\"Coder\\\"!\\nWie geht's?\",\"x\":1"#;
+        assert_eq!(character_name_from_html(html).as_deref(), Some("VibeCoding-Assitent für WPU-FEEL"));
+        assert_eq!(page_string_field(html, "initialMessage").as_deref(), Some("Hallo, \"Coder\"!\nWie geht's?"));
+    }
+
+    #[test]
+    fn outdated_action_is_detected() {
+        // what AIS.chat really answers when next-action is out of date
+        let e = describe_http_error(reqwest::StatusCode::BAD_REQUEST, "Invalid Server Action request.");
+        assert!(is_site_changed(&e));
+        assert!(is_site_changed(&describe_http_error(reqwest::StatusCode::NOT_FOUND, "")));
+        assert!(!is_site_changed(&describe_http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom")));
+    }
+
+    /// Talks to the real site: `cargo test -- --ignored live_`
+    #[test]
+    #[ignore]
+    fn live_setup_upload_and_reply() {
+        let mut s = Settings::default();
+        s.apply_invite_link(crate::settings::DEFAULT_INVITE_LINK).unwrap();
+        let summary = refresh(&mut s).expect("setup from the invite link");
+        println!("{summary} action={} deployment={} greeting={:?}", s.next_action, s.deployment_id, s.greeting);
+        assert!(s.is_ready());
+
+        let session = new_session_id();
+        let id = upload_file(&s, "note.txt", b"The secret word is pineapple.\n".to_vec(), &session).expect("upload");
+        let att = Attachment { name: "note.txt".into(), size: 30, data: AttachmentData::Uploaded(id) };
+        let msgs = vec![
+            ChatMessage::greeting(&s.greeting),
+            ChatMessage::user_with("What is the secret word in the attached file? Answer with one word.", vec![att]),
+        ];
+        let mut text = String::new();
+        let mut activity = Vec::new();
+        stream_reply(&s, build_body(&s, &msgs, &session), |ev| match ev {
+            Event::Text(t) => text.push_str(t),
+            Event::Activity(a) => activity.push(a.clone()),
+            _ => {}
+        })
+        .expect("reply");
+        println!("reply: {text:?} activity: {activity:?}");
+        assert!(text.to_lowercase().contains("pineapple"));
+        assert!(!text.contains("ai_activity"));
     }
 
     #[test]

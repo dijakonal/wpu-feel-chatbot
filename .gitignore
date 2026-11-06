@@ -1,0 +1,4 @@
+/target
+# never commit captured requests or personal settings
+*.curl
+settings.json
