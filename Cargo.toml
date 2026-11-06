@@ -9,6 +9,7 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "5"
 eframe = "0.29"
+keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "multipart"] }
 rfd = "0.15"
 pulldown-cmark = { version = "0.12", default-features = false }
