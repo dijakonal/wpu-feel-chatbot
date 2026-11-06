@@ -27,7 +27,13 @@ box sends. AIS.chat "can make mistakes" – check what it tells you.
    The app puts a short note in front of your newest message in the request –
    it is not shown in the window and not kept in the chat history, so a change
    applies from the next message on. *Automatic* sends no note.
-6. **➕ New chat** starts over; the round **■** button stops a long answer;
+6. **Several chats:** the list on the left (☰ hides it) holds all your chats,
+   newest first. Each one has its own context – its own AIS.chat session,
+   history, uploads and unsent draft – so the bot never mixes them up. An answer
+   keeps arriving in its chat while you look at another one ("typing…" in the
+   list). Right-click a chat (or double-click it) to rename it; ✖ deletes it
+   after asking. Chats are saved and come back after a restart.
+7. **➕ New chat** starts a new chat (the current one stays in the list); the round **■** button stops a long answer;
    **Copy** under an answer and on code blocks puts text on the clipboard.
 
 There is nothing to set up. To use a *different* shared character, open
@@ -58,6 +64,8 @@ Settings are stored in your user config folder, **not** in this repository:
 
 - Windows: `%APPDATA%\ais-chat-client\settings.json`
 - Linux: `~/.config/ais-chat-client/settings.json`
+
+Your chats are saved next to it in `conversations.json` (the newest 200).
 
 ## Attaching files
 
@@ -120,6 +128,7 @@ Windows and Linux and uploads the binaries as build artifacts.
 | `src/main.rs` | opens the window |
 | `src/app.rs` | chat window, input box, attachments, Settings window; background threads |
 | `src/ais.rs` | the AIS.chat protocol: request body, streamed-answer decoder, file upload, auto-detection |
+| `src/conversations.rs` | one chat's state, titles, saving/loading the chat list |
 | `src/settings.rs` | invite-link parsing, cURL import, loading/saving settings |
 | `src/markdown.rs` | Markdown → egui renderer |
 | `src/theme.rs` | colours (light/dark), fonts, widget style, avatar / send button / typing dots |

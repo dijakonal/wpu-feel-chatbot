@@ -11,6 +11,7 @@ use std::time::Duration;
 use eframe::egui::{self, Align, Color32, Key, Layout, Modifiers, RichText, Rounding, Stroke};
 
 use crate::ais::{self, Attachment, AttachmentData, ChatMessage, Event, Role};
+use crate::conversations::{self, Conversation, FileState, PendingFile};
 use crate::markdown;
 use crate::theme;
 use crate::settings::{Settings, DEFAULT_INVITE_LINK};
@@ -25,23 +26,11 @@ enum Msg {
     Refreshed { result: Result<(Settings, String), String>, from_settings: bool },
     /// A worker had to read fresh values from the site while sending.
     SettingsChanged(Settings),
-    Uploaded { id: u64, gen: u64, result: Result<String, String> },
-    Text { gen: u64, text: String },
-    Activity { gen: u64, status: String },
-    ReplyDone { gen: u64, result: Result<(), String> },
-}
-
-enum FileState {
-    Uploading,
-    Ready(AttachmentData),
-    Failed(String),
-}
-
-struct PendingFile {
-    id: u64,
-    name: String,
-    size: usize,
-    state: FileState,
+    // `conv` = id of the chat the work belongs to (it may no longer be the open one)
+    Uploaded { conv: String, id: u64, result: Result<String, String> },
+    Text { conv: String, gen: u64, text: String },
+    Activity { conv: String, gen: u64, status: String },
+    ReplyDone { conv: String, gen: u64, result: Result<(), String> },
 }
 
 #[derive(PartialEq)]
@@ -55,20 +44,15 @@ pub struct App {
     settings: Settings,
     conn: Conn,
 
-    // chat
-    messages: Vec<ChatMessage>,
-    session_id: String,
-    input: String,
-    pending: Vec<PendingFile>,
+    // chats; `App` derefs to the open one, so `self.messages`, `self.input`, … mean "of the
+    // open chat"
+    convs: Vec<Conversation>,
+    active: usize,
+    show_sidebar: bool,
+    renaming: Option<(String, String)>,
+    confirm_delete: Option<String>,
     next_file_id: u64,
-    /// Bumped on New chat / Stop so late answers from old requests are ignored.
-    gen: u64,
-    busy: bool,
-    activity: String,
-    error: Option<String>,
     focus_input: bool,
-    /// Part of an answer the next message replies to.
-    quote: Option<String>,
     /// Where the floating "Reply" button sits while text is selected (last frame).
     reply_button: Option<egui::Rect>,
     /// Where the pointer was released after selecting text, and whether the drag went
@@ -102,17 +86,13 @@ impl App {
             draft: settings.clone(),
             settings,
             conn: Conn::Connecting,
-            messages: Vec::new(),
-            session_id: ais::new_session_id(),
-            input: String::new(),
-            pending: Vec::new(),
+            convs: conversations::load(),
+            active: 0,
+            show_sidebar: true,
+            renaming: None,
+            confirm_delete: None,
             next_file_id: 0,
-            gen: 0,
-            busy: false,
-            activity: String::new(),
-            error: None,
             focus_input: true,
-            quote: None,
             reply_button: None,
             selection_anchor: None,
             drag_origin: None,
@@ -125,7 +105,8 @@ impl App {
             ctx: cc.egui_ctx.clone(),
             title: String::new(),
         };
-        app.reset_chat();
+        // always open on a fresh chat; earlier ones are in the sidebar
+        app.new_chat();
         app.start_refresh(false);
         install_quote_capture(&cc.egui_ctx);
         app
@@ -169,12 +150,12 @@ impl App {
         self.pending.push(PendingFile { id, name: name.clone(), size, state: FileState::Uploading });
         let s = self.settings.clone();
         let session = self.session_id.clone();
-        let gen = self.gen;
+        let conv = self.id.clone();
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let result = ais::upload_file(&s, &name, bytes, &session).map_err(|e| e.to_string());
-            let _ = tx.send(Msg::Uploaded { id, gen, result });
+            let _ = tx.send(Msg::Uploaded { conv, id, result });
             ctx.request_repaint();
         });
     }
@@ -222,7 +203,9 @@ impl App {
             msg = msg.with_quote(&q);
         }
         self.messages.push(msg);
+        self.touch();
         self.start_reply();
+        self.save_chats();
     }
 
     /// Ask for an answer to the conversation as it is now.
@@ -239,12 +222,13 @@ impl App {
 
         let mut s = self.settings.clone();
         let session = self.session_id.clone();
+        let conv = self.id.clone();
         let gen = self.gen;
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let result = reply_worker(&mut s, &history, &session, gen, &tx, &ctx);
-            let _ = tx.send(Msg::ReplyDone { gen, result: result.map_err(|e| e.to_string()) });
+            let result = reply_worker(&mut s, &history, &session, &conv, gen, &tx, &ctx);
+            let _ = tx.send(Msg::ReplyDone { conv, gen, result: result.map_err(|e| e.to_string()) });
             ctx.request_repaint();
         });
     }
@@ -274,31 +258,72 @@ impl App {
                 }
             }
         }
+        self.save_chats();
     }
 
-    fn reset_chat(&mut self) {
-        self.gen += 1;
-        self.busy = false;
-        self.activity.clear();
-        self.error = None;
-        self.pending.clear();
-        self.quote = None;
-        self.session_id = ais::new_session_id();
-        let greeting = if self.settings.greeting.trim().is_empty() { FALLBACK_GREETING } else { self.settings.greeting.as_str() };
-        self.messages = vec![ChatMessage::greeting(greeting)];
+    fn greeting(&self) -> String {
+        if self.settings.greeting.trim().is_empty() { FALLBACK_GREETING.to_string() } else { self.settings.greeting.clone() }
+    }
+
+    /// Open an empty chat: reuse one that is still empty, otherwise start a new one.
+    fn new_chat(&mut self) {
+        self.renaming = None;
+        self.confirm_delete = None;
         self.focus_input = true;
+        if let Some(i) = self.convs.iter().position(|c| c.is_empty() && !c.busy) {
+            self.active = i;
+            return;
+        }
+        let c = Conversation::new(&self.greeting());
+        self.convs.insert(0, c);
+        self.active = 0;
+    }
+
+    fn open_chat(&mut self, id: &str) {
+        self.save_chats(); // keeps the draft of the chat we leave
+        if let Some(i) = self.convs.iter().position(|c| c.id == id) {
+            self.active = i;
+            self.focus_input = true;
+            self.renaming = None;
+        }
+    }
+
+    fn delete_chat(&mut self, id: &str) {
+        let Some(i) = self.convs.iter().position(|c| c.id == id) else { return };
+        let open_id = self.id.clone();
+        self.convs.remove(i);
+        self.confirm_delete = None;
+        if self.convs.is_empty() {
+            self.convs.push(Conversation::new(&self.greeting()));
+        }
+        // keep the open chat open; if it was the deleted one, open the newest
+        self.active = self.convs.iter().position(|c| c.id == open_id).unwrap_or_else(|| self.newest_index());
+        self.save_chats();
+    }
+
+    fn newest_index(&self) -> usize {
+        (0..self.convs.len()).max_by_key(|&i| self.convs[i].updated).unwrap_or(0)
+    }
+
+    fn save_chats(&self) {
+        if let Err(e) = conversations::save(&self.convs) {
+            eprintln!("could not save chats: {e}");
+        }
     }
 
     fn chat_is_empty(&self) -> bool {
-        self.messages.iter().all(|m| m.initial)
+        self.is_empty()
     }
 
     fn apply_settings(&mut self, s: Settings) {
         let greeting_changed = s.greeting != self.settings.greeting;
         self.settings = s;
         let _ = self.settings.save();
-        if greeting_changed && self.chat_is_empty() && !self.busy {
-            self.reset_chat();
+        if greeting_changed {
+            let g = self.greeting();
+            for c in &mut self.convs {
+                c.set_greeting(&g);
+            }
         }
     }
 
@@ -335,37 +360,43 @@ impl App {
                     self.apply_settings(s);
                     self.conn = Conn::Ready;
                 }
-                Msg::Uploaded { id, gen, result } => {
-                    if gen != self.gen {
-                        continue;
-                    }
-                    if let Some(f) = self.pending.iter_mut().find(|f| f.id == id) {
+                Msg::Uploaded { conv, id, result } => {
+                    let Some(c) = self.convs.iter_mut().find(|c| c.id == conv) else { continue };
+                    if let Some(f) = c.pending.iter_mut().find(|f| f.id == id) {
                         f.state = match result {
                             Ok(file_id) => FileState::Ready(AttachmentData::Uploaded(file_id)),
                             Err(e) => FileState::Failed(e),
                         };
                     }
                 }
-                Msg::Text { gen, text } if gen == self.gen => {
-                    if let Some(m) = self.messages.last_mut() {
-                        m.content.push_str(&text);
+                Msg::Text { conv, gen, text } => {
+                    if let Some(c) = self.convs.iter_mut().find(|c| c.id == conv && c.gen == gen) {
+                        if let Some(m) = c.messages.last_mut() {
+                            m.content.push_str(&text);
+                        }
                     }
                 }
-                Msg::Activity { gen, status } if gen == self.gen => self.activity = status,
-                Msg::ReplyDone { gen, result } if gen == self.gen => {
-                    self.busy = false;
-                    self.activity.clear();
+                Msg::Activity { conv, gen, status } => {
+                    if let Some(c) = self.convs.iter_mut().find(|c| c.id == conv && c.gen == gen) {
+                        c.activity = status;
+                    }
+                }
+                Msg::ReplyDone { conv, gen, result } => {
+                    let Some(c) = self.convs.iter_mut().find(|c| c.id == conv && c.gen == gen) else { continue };
+                    c.busy = false;
+                    c.activity.clear();
+                    c.touch();
                     if let Err(e) = result {
-                        if matches!(self.messages.last(), Some(m) if m.role == Role::Assistant && !m.initial && m.content.trim().is_empty())
+                        if matches!(c.messages.last(), Some(m) if m.role == Role::Assistant && !m.initial && m.content.trim().is_empty())
                         {
-                            self.messages.pop();
+                            c.messages.pop();
                         }
-                        self.error = Some(e);
+                        c.error = Some(e);
                     } else {
                         self.conn = Conn::Ready;
                     }
+                    self.save_chats();
                 }
-                _ => {}
             }
         }
     }
@@ -378,6 +409,11 @@ impl App {
             .frame(egui::Frame::none().fill(p.panel).inner_margin(egui::Margin::symmetric(18.0, 10.0)).stroke(Stroke::new(1.0_f32, p.border)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    let menu = ui.add(theme::Btn::new(theme::Kind::Ghost, RichText::new("☰").size(18.0)).min_size(egui::vec2(34.0, 34.0)));
+                    let tip = if self.show_sidebar { "Hide the chat list" } else { "Show the chat list" };
+                    if menu.on_hover_text(tip).clicked() {
+                        self.show_sidebar = !self.show_sidebar;
+                    }
                     theme::avatar(ui, &self.settings.display_name(), 38.0);
                     ui.add_space(2.0);
                     ui.vertical(|ui| {
@@ -407,14 +443,159 @@ impl App {
                             theme::Btn::new(theme::Kind::Secondary, "➕  New chat")
                                 .rounding(999.0)
                                 .min_size(egui::vec2(0.0, 32.0))
-                                .enabled(!self.chat_is_empty() || self.busy),
+                                .enabled(!self.chat_is_empty()),
                         );
-                        if new_chat.on_hover_text("Start over (the bot forgets this conversation)").clicked() {
-                            self.reset_chat();
+                        if new_chat.on_hover_text("Start a new chat (this one stays in the list)").clicked() {
+                            self.new_chat();
                         }
                     });
                 });
             });
+    }
+
+    /// The list of chats on the left.
+    fn sidebar(&mut self, ctx: &egui::Context) {
+        if !self.show_sidebar {
+            return;
+        }
+        let p = theme::palette(ctx.style().visuals.dark_mode);
+        egui::SidePanel::left("chats")
+            .exact_width(250.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::none().fill(p.panel).stroke(Stroke::new(1.0_f32, p.border)).inner_margin(egui::Margin::symmetric(10.0, 12.0)))
+            .show(ctx, |ui| {
+                let w = ui.available_width();
+                let new = ui.add(theme::Btn::new(theme::Kind::Secondary, "➕  New chat").min_size(egui::vec2(w, 36.0)).enabled(!self.chat_is_empty()));
+                if new.on_hover_text("Start a new chat (this one stays in the list)").clicked() {
+                    self.new_chat();
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new("Chats").small().family(theme::bold()).color(p.weak));
+                ui.add_space(2.0);
+
+                let mut order: Vec<usize> = (0..self.convs.len()).collect();
+                order.sort_by(|&a, &b| self.convs[b].updated.cmp(&self.convs[a].updated));
+                let active_id = self.id.clone();
+                let mut open = None;
+                let mut delete = None;
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for i in order {
+                        let c = &self.convs[i];
+                        // the open chat is listed even while empty; other empty chats are not
+                        if c.is_empty() && c.id != active_id {
+                            continue;
+                        }
+                        match self.chat_row(ui, i, c.id == active_id, p) {
+                            RowAction::None => {}
+                            RowAction::Open(id) => open = Some(id),
+                            RowAction::Delete(id) => delete = Some(id),
+                        }
+                    }
+                });
+                if let Some(id) = delete {
+                    self.delete_chat(&id);
+                } else if let Some(id) = open {
+                    self.open_chat(&id);
+                }
+            });
+    }
+
+    fn chat_row(&mut self, ui: &mut egui::Ui, i: usize, active: bool, p: theme::Palette) -> RowAction {
+        let id = self.convs[i].id.clone();
+        let w = ui.available_width();
+        let row_id = egui::Id::new(("chat-row", &id));
+
+        // renaming: a text field instead of the title
+        if let Some((rid, text)) = &mut self.renaming {
+            if *rid == id {
+                let r = ui.add(egui::TextEdit::singleline(text).desired_width(w).margin(egui::Margin::symmetric(10.0, 8.0)));
+                r.request_focus();
+                let done = r.lost_focus() || ui.input(|i| i.key_pressed(Key::Enter));
+                let cancel = ui.input(|i| i.key_pressed(Key::Escape));
+                if cancel {
+                    self.renaming = None;
+                } else if done {
+                    let t = text.trim().to_string();
+                    self.convs[i].custom_title = if t.is_empty() { None } else { Some(t) };
+                    self.renaming = None;
+                    self.save_chats();
+                }
+                ui.add_space(2.0);
+                return RowAction::None;
+            }
+        }
+
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 50.0), egui::Sense::click());
+        let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
+        let t = theme::hover_anim(ui, row_id, hovered);
+        let fill = if active { p.accent_soft } else { theme::mix(Color32::TRANSPARENT, p.surface_hi, t) };
+        ui.painter().rect_filled(rect, 10.0, fill);
+        if active {
+            let bar = egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 12.0), egui::vec2(3.0, rect.height() - 24.0));
+            ui.painter().rect_filled(bar, 2.0, p.accent);
+        }
+
+        let c = &self.convs[i];
+        let title_color = if active { p.text } else { theme::mix(p.weak, p.text, 0.55 + 0.45 * t) };
+        let title_font = if active { egui::FontId::new(14.0, theme::bold()) } else { egui::FontId::proportional(14.0) };
+        let right_space = if hovered { 34.0 } else { 8.0 };
+        let max_w = rect.width() - 14.0 - right_space;
+        // cut long titles with "…" so they fit next to the delete button
+        let mut text = c.title();
+        let mut title = ui.painter().layout(text.clone(), title_font.clone(), title_color, f32::INFINITY);
+        while title.size().x > max_w && !text.is_empty() {
+            text.pop();
+            title = ui.painter().layout(format!("{}…", text.trim_end()), title_font.clone(), title_color, f32::INFINITY);
+        }
+        ui.painter().galley(rect.left_top() + egui::vec2(12.0, 8.0), title, title_color);
+        let sub = if c.busy { "typing…".to_string() } else if c.error.is_some() { "⚠ not sent".to_string() } else { conversations::when(c.updated) };
+        let sub_color = if c.busy { p.success } else if c.error.is_some() { p.danger } else { p.weak };
+        ui.painter().text(rect.left_top() + egui::vec2(12.0, 29.0), egui::Align2::LEFT_TOP, sub, egui::FontId::proportional(11.5), sub_color);
+
+        let mut action = RowAction::None;
+        if self.confirm_delete.as_deref() == Some(id.as_str()) {
+            // second step of deleting: ask once more inside the row
+            let area = egui::Rect::from_min_max(rect.right_top() - egui::vec2(118.0, -9.0), rect.right_bottom() - egui::vec2(6.0, 9.0));
+            ui.painter().rect_filled(area, 8.0, p.panel);
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)));
+            if child.add(theme::Btn::new(theme::Kind::Ghost, RichText::new("Cancel").small()).min_size(egui::vec2(0.0, 28.0))).clicked() {
+                self.confirm_delete = None;
+            }
+            let del = theme::Btn::new(theme::Kind::Ghost, RichText::new("Delete").small().color(p.danger)).min_size(egui::vec2(0.0, 28.0));
+            if child.add(del).clicked() {
+                action = RowAction::Delete(id.clone());
+            }
+            return action;
+        }
+        if hovered && !c.busy {
+            let x_rect = egui::Rect::from_center_size(rect.right_center() - egui::vec2(20.0, 0.0), egui::vec2(26.0, 26.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(x_rect));
+            let x = theme::Btn::new(theme::Kind::Ghost, RichText::new("✖").small()).min_size(egui::vec2(26.0, 26.0)).rounding(999.0);
+            if child.add(x).on_hover_text("Delete this chat").clicked() {
+                self.confirm_delete = Some(id.clone());
+                return RowAction::None;
+            }
+        }
+
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.clicked() {
+            action = RowAction::Open(id.clone());
+        }
+        resp.context_menu(|ui| {
+            if ui.button("✏  Rename").clicked() {
+                self.renaming = Some((id.clone(), self.convs[i].title()));
+                ui.close_menu();
+            }
+            if ui.add_enabled(!self.convs[i].busy, egui::Button::new("🗑  Delete")).clicked() {
+                self.confirm_delete = Some(id.clone());
+                ui.close_menu();
+            }
+        });
+        if resp.double_clicked() {
+            self.renaming = Some((id.clone(), self.convs[i].title()));
+        }
+        action
     }
 
     fn open_settings(&mut self) {
@@ -954,9 +1135,23 @@ impl App {
     }
 }
 
+enum RowAction {
+    None,
+    Open(String),
+    Delete(String),
+}
+
 /// Send `history`, streaming the answer to the window. If the site was updated, read fresh
 /// values once and try again.
-fn reply_worker(s: &mut Settings, history: &[ChatMessage], session: &str, gen: u64, tx: &Sender<Msg>, ctx: &egui::Context) -> anyhow::Result<()> {
+fn reply_worker(
+    s: &mut Settings,
+    history: &[ChatMessage],
+    session: &str,
+    conv: &str,
+    gen: u64,
+    tx: &Sender<Msg>,
+    ctx: &egui::Context,
+) -> anyhow::Result<()> {
     if !s.is_ready() {
         ais::refresh(s)?;
         let _ = tx.send(Msg::SettingsChanged(s.clone()));
@@ -969,9 +1164,9 @@ fn reply_worker(s: &mut Settings, history: &[ChatMessage], session: &str, gen: u
             let msg = match ev {
                 Event::Text(t) => {
                     got_text = true;
-                    Msg::Text { gen, text: t.clone() }
+                    Msg::Text { conv: conv.to_string(), gen, text: t.clone() }
                 }
-                Event::Activity(a) => Msg::Activity { gen, status: a.clone() },
+                Event::Activity(a) => Msg::Activity { conv: conv.to_string(), gen, status: a.clone() },
                 _ => return,
             };
             let _ = tx.send(msg);
@@ -981,7 +1176,7 @@ fn reply_worker(s: &mut Settings, history: &[ChatMessage], session: &str, gen: u
             Ok(_) => return Ok(()),
             Err(e) if attempt == 0 && !got_text && ais::is_site_changed(&e) => {
                 attempt += 1;
-                let _ = tx.send(Msg::Activity { gen, status: "AIS.chat was updated – reconnecting…".into() });
+                let _ = tx.send(Msg::Activity { conv: conv.to_string(), gen, status: "AIS.chat was updated – reconnecting…".into() });
                 ctx.request_repaint();
                 ais::refresh(s).map_err(|re| anyhow::anyhow!("{e} Reconnecting did not work either: {re}"))?;
                 let _ = tx.send(Msg::SettingsChanged(s.clone()));
@@ -1257,6 +1452,10 @@ impl eframe::App for App {
         }
     }
 
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_chats();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_messages();
 
@@ -1281,6 +1480,7 @@ impl eframe::App for App {
 
         self.drop_zone(ctx);
         self.top_bar(ctx);
+        self.sidebar(ctx);
         self.bottom_bar(ctx);
         self.chat(ctx);
         self.settings_window(ctx);
@@ -1307,5 +1507,19 @@ mod tests {
         assert_eq!(short_quote("1\n2\n3\n4\n5", 100), "1\n2\n3\n4…");
         assert_eq!(short_quote("abcdef", 3), "abc…");
         assert_eq!(short_quote("ok", 10), "ok");
+    }
+}
+
+/// `App` stands for the open chat when a chat field is used (`self.messages`, `self.input`, …).
+impl std::ops::Deref for App {
+    type Target = Conversation;
+    fn deref(&self) -> &Conversation {
+        &self.convs[self.active]
+    }
+}
+
+impl std::ops::DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Conversation {
+        &mut self.convs[self.active]
     }
 }

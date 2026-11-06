@@ -15,14 +15,14 @@ use crate::settings::Settings;
 
 // ------------------------------------------------------------------ chat model
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     User,
     Assistant,
 }
 
 /// What an attached file turned into.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum AttachmentData {
     /// Text file whose contents were pasted into the message (works without any upload endpoint).
     Inline(String),
@@ -30,14 +30,14 @@ pub enum AttachmentData {
     Uploaded(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub name: String,
     pub size: usize,
     pub data: AttachmentData,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub id: String,
     pub role: Role,
@@ -48,13 +48,21 @@ pub struct ChatMessage {
     pub attachments: Vec<Attachment>,
     /// ISO-8601 UTC timestamp, e.g. 2026-11-06T11:10:09.517Z
     pub created_at: String,
-    /// When the message was created in this window (drives the slide-in effect).
+    /// When the message was created in this window (drives the slide-in effect). Not saved:
+    /// messages loaded from disk count as old, so they do not fade in.
+    #[serde(skip, default = "long_ago")]
     pub born: std::time::Instant,
     /// The fixed greeting shown at the top of every chat (sent as "initial-message").
     pub initial: bool,
     /// Part of an earlier answer this message replies to (shown above the text; sent as a
     /// Markdown quote at the start of `content`).
+    #[serde(default)]
     pub quote: Option<String>,
+}
+
+fn long_ago() -> std::time::Instant {
+    let now = std::time::Instant::now();
+    now.checked_sub(std::time::Duration::from_secs(5)).unwrap_or(now)
 }
 
 fn now_iso() -> String {
