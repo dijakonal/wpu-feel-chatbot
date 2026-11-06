@@ -24,7 +24,9 @@ First release of the AIS.chat desktop client.
 - Let the bot read files from your repository: **+ → From GitHub**.
 - Save code from answers straight into your repository's files with **⬆ GitHub**,
   or automatically: a block the answer names (e.g. `src/main.rs`) updates that
-  file on your branch, one commit per answer.
+  file on your branch, one commit per answer. The bot is asked to always show
+  whole files, and if it shows only a part, the app merges it into the existing
+  file instead of overwriting it.
 
 **Look**
 - Modern light and dark design (follows the system, or choose in Settings).

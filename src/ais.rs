@@ -154,7 +154,7 @@ pub fn build_body(s: &Settings, msgs: &[ChatMessage], session_id: &str) -> Strin
     // The language note travels only with the newest user message and is never stored in the
     // chat, so changing the language takes effect with the next message.
     let last_user = msgs.iter().rposition(|m| m.role == Role::User);
-    let note = s.language_note();
+    let note = s.app_note();
     let messages: Vec<Value> = msgs
         .iter()
         .enumerate()

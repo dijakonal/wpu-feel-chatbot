@@ -132,8 +132,14 @@ src/main.rs"). Automatic mode only saves blocks that name a file, so command
 snippets like `cargo run` are not committed; a block without a file name is saved
 as `code-1.py`, `code-2.js`, … when you click **⬆ GitHub** on it.
 
-Careful: if the bot shows only *part* of a file, saving it replaces the whole file
-with that part. GitHub keeps every earlier version in the history.
+**Nothing gets lost.** While GitHub saving is on, the bot is asked (in a hidden
+note with every message) to always show the *complete* file with its path. And if
+an answer still shows only part of a file, the app does not simply overwrite the
+file: it fetches the current version from GitHub and lets the bot merge the new
+code into it (in a separate request you do not see), then saves the complete
+result – "Merged into the existing file" is noted in the commit. If merging does
+not work, nothing is saved and the button says why. New files are saved as they
+are, and files that are already up to date are left alone.
 The button turns into **✔ On GitHub** (click it to open the commit) or shows
 what went wrong. Empty repositories and branches that do not exist yet work too.
 

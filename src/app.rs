@@ -744,10 +744,11 @@ impl App {
             self.push_states.insert(k.clone(), PushState::Pushing);
         }
         let cfg = self.settings.github_config();
+        let s = self.settings.clone();
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let result = github::push(&cfg, &files, &message).map_err(|e| e.to_string());
+            let result = save_to_github(&s, &cfg, files, &message).map_err(|e| e.to_string());
             let _ = tx.send(Msg::Pushed { keys, result });
             ctx.request_repaint();
         });
@@ -1010,7 +1011,7 @@ impl App {
         let mut auto = self.settings.github_auto;
         ui.radio_value(&mut auto, false, "Only when I click ⬆ GitHub on a code block");
         ui.radio_value(&mut auto, true, "Automatically: every file an answer contains (named code blocks)").on_hover_text(
-            "Careful: if the bot shows only part of a file, the whole file is replaced by that part. GitHub keeps the old version in the history.",
+            "Files that already exist are merged with the new code first, so a partial answer does not delete the rest of the file.",
         );
         if auto != self.settings.github_auto {
             let mut s = self.settings.clone();
@@ -1682,6 +1683,38 @@ fn not_attachable(f: &github::RepoFile) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Save files to GitHub without losing what is already there: a file that exists is merged
+/// with the new code first (the bot writes the complete updated file), new files are saved
+/// as they are, unchanged files are left out. Returns the commit's address.
+fn save_to_github(s: &Settings, cfg: &github::Config, files: Vec<github::FileOut>, message: &str) -> anyhow::Result<String> {
+    let branch = github::target_branch(cfg)?;
+    let mut out = Vec::new();
+    let mut merged = Vec::new();
+    for mut f in files {
+        if let Some(current) = github::read_file_if_exists(cfg, &branch, &f.path)? {
+            let content = crate::merge::merge(s, &f.path, &current, &f.content)?;
+            if content.trim_end() == current.trim_end() {
+                continue; // already on GitHub like this
+            }
+            if content.trim_end() != f.content.trim_end() {
+                merged.push(f.path.clone());
+            }
+            f.content = content;
+        }
+        out.push(f);
+    }
+    if out.is_empty() {
+        let repo = github::normalize_repo(&cfg.repo).unwrap_or_default();
+        return Ok(format!("https://github.com/{repo}/tree/{branch}"));
+    }
+    let message = if merged.is_empty() {
+        message.to_string()
+    } else {
+        format!("{message}\nMerged into the existing file: {}", merged.join(", "))
+    };
+    github::push(cfg, &out, &message)
 }
 
 enum RowAction {

@@ -9,6 +9,7 @@ mod conversations;
 mod github;
 mod i18n;
 mod markdown;
+mod merge;
 mod settings;
 mod theme;
 

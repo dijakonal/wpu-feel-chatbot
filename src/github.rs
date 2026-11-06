@@ -268,6 +268,23 @@ pub fn list_files(cfg: &Config) -> Result<(String, Vec<RepoFile>, bool)> {
     Ok((branch, files, v["truncated"].as_bool().unwrap_or(false)))
 }
 
+/// The branch pushes go to: the configured one, else the repository's default branch.
+pub fn target_branch(cfg: &Config) -> Result<String> {
+    if !cfg.branch.trim().is_empty() {
+        return Ok(cfg.branch.trim().to_string());
+    }
+    Ok(Api::new(cfg)?.repo_info()?.0)
+}
+
+/// The text of one file, `None` if it does not exist (yet) on that branch.
+pub fn read_file_if_exists(cfg: &Config, branch: &str, path: &str) -> Result<Option<String>> {
+    match read_file(cfg, branch, path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.to_string().contains("(HTTP 404)") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// The text of one file.
 pub fn read_file(cfg: &Config, branch: &str, path: &str) -> Result<String> {
     let api = Api::new(cfg)?;
@@ -569,6 +586,14 @@ mod tests {
         assert_eq!(read_file(&cfg(&api, ""), "main", "src/spiel.py").unwrap(), "print('hallo')\n");
         let log: Vec<(String, String, String)> = rx.try_iter().collect();
         assert!(log.iter().any(|l| l.1 == "/repos/o/r/contents/src/spiel.py?ref=main"));
+    }
+
+    #[test]
+    fn missing_file_is_not_an_error() {
+        let (api, _rx) = mock(vec![("GET", "/repos/o/r/contents/new.rs?ref=main", 200, "fn x() {}")]);
+        assert_eq!(read_file_if_exists(&cfg(&api, ""), "main", "new.rs").unwrap().as_deref(), Some("fn x() {}"));
+        assert_eq!(read_file_if_exists(&cfg(&api, ""), "main", "other.rs").unwrap(), None);
+        assert_eq!(target_branch(&cfg(&api, "dev")).unwrap(), "dev");
     }
 
     #[test]

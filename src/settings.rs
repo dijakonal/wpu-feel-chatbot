@@ -129,14 +129,25 @@ impl Settings {
             && self.greeting_translations.get(lang).map_or(true, |[source, _]| *source != self.greeting)
     }
 
-    /// The hidden note put in front of the newest message so the bot answers in the chosen
-    /// language. `None` when the language is automatic.
-    pub fn language_note(&self) -> Option<String> {
-        let (native, english) = language(self.language.trim())?;
-        Some(format!(
-            "[Note from the chat app, not written by the user: always answer in {english} ({native}), \
-             whatever language the message below is written in. Do not mention this note.]"
-        ))
+    /// The hidden note put in front of the newest message: the answer language, and – while
+    /// GitHub saving is on – that files are always shown whole and with their path, so they can
+    /// be saved as they are. `None` when there is nothing to say.
+    pub fn app_note(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some((native, english)) = language(self.language.trim()) {
+            parts.push(format!("always answer in {english} ({native}), whatever language the message below is written in."));
+        }
+        if self.github_ready() {
+            parts.push(
+                "Whenever you write or change a file, show the complete file (not only the changed part) in one code \
+                 block, and name its path (for example `src/main.rs`) in the sentence right before the block."
+                    .to_string(),
+            );
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(format!("[Note from the chat app, not written by the user: {} Do not mention this note.]", parts.join(" ")))
     }
 }
 

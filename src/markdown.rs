@@ -510,12 +510,12 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str, push: Option<PushState>) -> b
                     let ghost = |text: RichText| crate::theme::Btn::new(crate::theme::Kind::Ghost, text.small());
                     match state {
                         PushState::Idle => {
-                            if ui.add(ghost(RichText::new("⬆ GitHub"))).on_hover_text("Save this code to your GitHub repository as the file the answer names (it replaces that file; the old version stays in the GitHub history)").clicked() {
+                            if ui.add(ghost(RichText::new("⬆ GitHub"))).on_hover_text("Save this code to your GitHub repository as the file the answer names (an existing file is merged with it, not overwritten)").clicked() {
                                 push_clicked = true;
                             }
                         }
                         PushState::Pushing => {
-                            ui.label(RichText::new("Pushing…").small().color(p.weak));
+                            ui.label(RichText::new("Saving…").small().color(p.weak)).on_hover_text("Merging with the file on GitHub and saving");
                             ui.add(egui::Spinner::new().size(12.0));
                         }
                         PushState::Done(url) => {
