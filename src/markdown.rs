@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn lists_code_blocks_with_text_before() {
-        let md = "Save this as `main.py`:\n\n```python\nprint(1)\n```\n\n- Then **style.css**:\n\n  ```css\nbody{}\n  ```\n\n| a |\n|---|\n| b |\n\n```\nraw\n```";
+        let md = "Save this as `main.py`:\n\n```python\nprint(1)\n```\n\n- Then **style.css**:\n\n  ```css\n  body{}\n  ```\n\n| a |\n|---|\n| b |\n\n```\nraw\n```";
         let blocks = code_blocks(md);
         assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0].lang, "python");
