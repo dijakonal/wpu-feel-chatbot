@@ -380,13 +380,15 @@ impl App {
                         });
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let gear = ui.add(egui::Button::new(RichText::new("⚙").size(18.0)).frame(false).min_size(egui::vec2(34.0, 34.0)));
+                        let gear = ui.add(theme::Btn::new(theme::Kind::Ghost, RichText::new("⚙").size(18.0)).min_size(egui::vec2(34.0, 34.0)));
                         if gear.on_hover_text("Settings").clicked() {
                             self.open_settings();
                         }
-                        let new_chat = ui.add_enabled(
-                            !self.chat_is_empty() || self.busy,
-                            egui::Button::new("➕  New chat").rounding(999.0).min_size(egui::vec2(0.0, 32.0)),
+                        let new_chat = ui.add(
+                            theme::Btn::new(theme::Kind::Secondary, "➕  New chat")
+                                .rounding(999.0)
+                                .min_size(egui::vec2(0.0, 32.0))
+                                .enabled(!self.chat_is_empty() || self.busy),
                         );
                         if new_chat.on_hover_text("Start over (the bot forgets this conversation)").clicked() {
                             self.reset_chat();
@@ -418,10 +420,10 @@ impl App {
             let e = e.clone();
             notice(ui, p.danger, |ui| {
                 ui.label(RichText::new(format!("Not connected. {e}")).color(p.text));
-                if ui.button("Try again").clicked() {
+                if theme::secondary_button(ui, "Try again").clicked() {
                     self.start_refresh(false);
                 }
-                if ui.button("Settings").clicked() {
+                if theme::secondary_button(ui, "Settings").clicked() {
                     self.open_settings();
                 }
             });
@@ -429,7 +431,7 @@ impl App {
         if let Some(e) = self.error.clone() {
             notice(ui, p.danger, |ui| {
                 ui.label(RichText::new(e).color(p.text));
-                if ui.button("↻ Retry").clicked() {
+                if theme::secondary_button(ui, "↻ Retry").clicked() {
                     self.retry();
                 }
                 if theme::ghost_button(ui, "✖").on_hover_text("Dismiss").clicked() {
@@ -447,8 +449,10 @@ impl App {
             send_now = true;
         }
 
-        let border = if focused { p.accent } else { p.border };
-        egui::Frame::none()
+        let composer_id = egui::Id::new("composer");
+        let hover = theme::remembered_hover(ui, composer_id);
+        let border = if focused { p.accent } else { theme::mix(p.border, p.accent, hover * 0.6) };
+        let composer = egui::Frame::none()
             .fill(p.surface)
             .rounding(20.0)
             .stroke(Stroke::new(if focused { 1.5_f32 } else { 1.0_f32 }, border))
@@ -481,7 +485,8 @@ impl App {
                                         ui.label(RichText::new(icon).color(color));
                                     }
                                     ui.label(RichText::new(&f.name).color(color)).on_hover_text(format!("{} – {note}", human_size(f.size)));
-                                    if ui.add(egui::Button::new(RichText::new("✖").small().color(p.weak)).frame(false)).on_hover_text("Remove").clicked() {
+                                    let x = theme::Btn::new(theme::Kind::Ghost, RichText::new("✖").small()).min_size(egui::vec2(20.0, 20.0)).rounding(999.0);
+                                    if ui.add(x).on_hover_text("Remove").clicked() {
                                         remove = Some(f.id);
                                     }
                                 });
@@ -528,6 +533,7 @@ impl App {
                     }
                 });
             });
+        theme::remember_hover(ui, composer_id, composer.response.hovered() || ui.rect_contains_pointer(composer.response.rect));
         ui.add_space(4.0);
         ui.vertical_centered(|ui| {
             ui.label(RichText::new("Enter to send · Shift+Enter for a new line · AIS.chat can make mistakes").small().color(p.weak));
@@ -582,11 +588,7 @@ impl App {
             ui.columns(cols, |columns| {
                 for (col, idea) in columns.iter_mut().zip(row) {
                     let w = col.available_width();
-                    let b = egui::Button::new(RichText::new(*idea).color(p.text))
-                        .fill(p.surface)
-                        .stroke(Stroke::new(1.0_f32, p.border))
-                        .rounding(14.0)
-                        .min_size(egui::vec2(w, 44.0));
+                    let b = theme::Btn::new(theme::Kind::Card, *idea).min_size(egui::vec2(w, 46.0));
                     if col.add(b).on_hover_text("Put this in the message box").clicked() {
                         picked = Some(*idea);
                     }
@@ -648,11 +650,12 @@ impl App {
                     let pressed_enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        let connect = theme::primary_button(ui, if self.connecting_from_settings { "Connecting…" } else { "Connect" });
+                        let label = if self.connecting_from_settings { "Connecting…" } else { "Connect" };
+                        let connect = ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(!self.connecting_from_settings));
                         if (connect.clicked() || pressed_enter) && !self.connecting_from_settings {
                             self.connect_from_settings();
                         }
-                        if ui.add(egui::Button::new("Use class link").min_size(egui::vec2(0.0, 34.0))).on_hover_text(DEFAULT_INVITE_LINK).clicked() {
+                        if theme::secondary_button(ui, "Use class link").on_hover_text(DEFAULT_INVITE_LINK).clicked() {
                             self.link_input = DEFAULT_INVITE_LINK.to_string();
                             self.connect_from_settings();
                         }
@@ -726,12 +729,12 @@ impl App {
                         ui.end_row();
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("Save these values").clicked() {
+                        if theme::secondary_button(ui, "Save these values").clicked() {
                             let s = self.draft.clone();
                             self.apply_settings(s);
                             self.settings_note = Some((true, "Saved.".into()));
                         }
-                        if ui.button("Detect again").on_hover_text("Read the current values from the AIS.chat page").clicked() {
+                        if theme::secondary_button(ui, "Detect again").on_hover_text("Read the current values from the AIS.chat page").clicked() {
                             self.draft.next_action.clear();
                             self.start_refresh(true);
                         }
@@ -748,7 +751,7 @@ impl App {
                         .color(p.weak),
                     );
                     ui.add(egui::TextEdit::multiline(&mut self.curl_input).desired_rows(3).desired_width(f32::INFINITY));
-                    if ui.button("Import").clicked() {
+                    if theme::secondary_button(ui, "Import").clicked() {
                         let mut s = self.draft.clone();
                         match s.import_curl(&self.curl_input) {
                             Ok(summary) => {
@@ -889,9 +892,18 @@ fn message_row(ui: &mut egui::Ui, m: &ChatMessage, name: &str, waiting: bool, ac
                     .rounding(Rounding { nw: 18.0, ne: 18.0, sw: 18.0, se: 6.0 })
                     .inner_margin(egui::Margin::symmetric(14.0, 10.0))
                     .show(ui, |ui| {
-                        ui.set_max_width(max_w);
+                        // size the bubble to its text instead of the full row
+                        let shown = m.display.as_deref().unwrap_or(&m.content);
+                        let text_w = ui
+                            .painter()
+                            .layout(shown.to_string(), egui::TextStyle::Body.resolve(ui.style()), p.on_accent, max_w)
+                            .size()
+                            .x;
+                        let files_w: f32 = m.attachments.iter().map(|a| a.name.chars().count() as f32 * 7.0 + 44.0).sum();
+                        let w = text_w.max(files_w.min(max_w)).clamp(10.0, max_w) + 1.0;
+                        ui.set_max_width(w);
+                        ui.set_min_width(w);
                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                            let shown = m.display.as_deref().unwrap_or(&m.content);
                             if !shown.trim().is_empty() {
                                 ui.label(RichText::new(shown).color(p.on_accent));
                             }
@@ -920,9 +932,11 @@ fn message_row(ui: &mut egui::Ui, m: &ChatMessage, name: &str, waiting: bool, ac
                 theme::avatar(ui, name, 30.0);
                 ui.add_space(2.0);
                 ui.vertical(|ui| {
-                    egui::Frame::none()
+                    let card_id = egui::Id::new(("card", &m.id));
+                    let hover = theme::remembered_hover(ui, card_id);
+                    let card = egui::Frame::none()
                         .fill(p.surface)
-                        .stroke(Stroke::new(1.0_f32, p.border))
+                        .stroke(Stroke::new(1.0_f32, theme::mix(p.border, p.accent, hover * 0.45)))
                         .rounding(Rounding { nw: 6.0, ne: 18.0, sw: 18.0, se: 18.0 })
                         .inner_margin(egui::Margin::symmetric(14.0, 10.0))
                         .show(ui, |ui| {
@@ -944,13 +958,14 @@ fn message_row(ui: &mut egui::Ui, m: &ChatMessage, name: &str, waiting: bool, ac
                                 });
                             }
                         });
+                    theme::remember_hover(ui, card_id, ui.rect_contains_pointer(card.response.rect));
                     if !m.initial && !waiting && !m.content.is_empty() {
                         let id = egui::Id::new(("copy-msg", &m.id));
                         let copied_at: Option<f64> = ui.data(|d| d.get_temp(id));
                         let now = ui.input(|i| i.time);
                         let recently = copied_at.map(|c| now - c < 1.5).unwrap_or(false);
                         let label = if recently { "✔ Copied" } else { "📋 Copy" };
-                        let r = ui.add(egui::Button::new(RichText::new(label).small().color(p.weak)).frame(false));
+                        let r = ui.add(theme::Btn::new(theme::Kind::Ghost, RichText::new(label).small()));
                         if r.on_hover_text("Copy the whole answer").clicked() {
                             ui.ctx().copy_text(m.content.clone());
                             ui.data_mut(|d| d.insert_temp(id, now));

@@ -174,20 +174,142 @@ fn style(s: &mut egui::Style, dark: bool) {
 
 // ------------------------------------------------------------------ small widgets
 
+// ------------------------------------------------------------------ hover-aware buttons
+
+/// Mix two colours: `t` = 0 gives `a`, 1 gives `b`.
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgba_premultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
+}
+
+/// 0 → 1 as the pointer rests on `id` (short fade in and out).
+pub fn hover_anim(ui: &Ui, id: egui::Id, hovered: bool) -> f32 {
+    ui.ctx().animate_bool_with_time(id.with("hover"), hovered, 0.12)
+}
+
+/// Hover amount for a container drawn before its response is known: uses last frame's state.
+pub fn remembered_hover(ui: &Ui, id: egui::Id) -> f32 {
+    let was: bool = ui.data(|d| d.get_temp(id.with("was-hovered")).unwrap_or(false));
+    hover_anim(ui, id, was)
+}
+
+pub fn remember_hover(ui: &Ui, id: egui::Id, hovered: bool) {
+    ui.data_mut(|d| d.insert_temp(id.with("was-hovered"), hovered));
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Kind {
+    /// Filled accent colour: the main action.
+    Primary,
+    /// Soft grey pill/box with a border that lights up.
+    Secondary,
+    /// No background until hovered (icons, Copy, ✖).
+    Ghost,
+    /// Large outlined card (suggestions on the start screen); text is left-aligned.
+    Card,
+}
+
+pub struct Btn {
+    text: egui::RichText,
+    kind: Kind,
+    min_size: Vec2,
+    rounding: f32,
+    padding: Vec2,
+    enabled: bool,
+}
+
+impl Btn {
+    pub fn new(kind: Kind, text: impl Into<egui::RichText>) -> Self {
+        let (min_size, rounding, padding) = match kind {
+            Kind::Primary | Kind::Secondary => (egui::vec2(0.0, 34.0), 10.0, egui::vec2(14.0, 6.0)),
+            Kind::Ghost => (egui::vec2(28.0, 28.0), 8.0, egui::vec2(8.0, 4.0)),
+            Kind::Card => (egui::vec2(0.0, 46.0), 14.0, egui::vec2(14.0, 8.0)),
+        };
+        Self { text: text.into(), kind, min_size, rounding, padding, enabled: true }
+    }
+    pub fn min_size(mut self, s: Vec2) -> Self {
+        self.min_size = s;
+        self
+    }
+    pub fn rounding(mut self, r: f32) -> Self {
+        self.rounding = r;
+        self
+    }
+    pub fn enabled(mut self, e: bool) -> Self {
+        self.enabled = e;
+        self
+    }
+}
+
+impl egui::Widget for Btn {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let p = of(ui);
+        let dark = ui.visuals().dark_mode;
+        let wrap_width = ui.available_width() - 2.0 * self.padding.x;
+        let galley = egui::WidgetText::from(self.text.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), wrap_width, TextStyle::Button);
+        let size = (galley.size() + 2.0 * self.padding).max(self.min_size);
+        let enabled = self.enabled && ui.is_enabled();
+        let sense = if enabled { Sense::click() } else { Sense::hover() };
+        let (rect, resp) = ui.allocate_exact_size(size, sense);
+        let hovered = enabled && resp.hovered();
+        let pressed = enabled && resp.is_pointer_button_down_on();
+        let t = hover_anim(ui, resp.id, hovered);
+
+        let hover_bg = if dark { rgb(45, 51, 68) } else { rgb(228, 231, 240) };
+        let (fill, stroke, text_color) = match self.kind {
+            Kind::Primary => (
+                mix(p.accent, p.accent_hover, t),
+                Stroke::new(1.0_f32, mix(Color32::TRANSPARENT, Color32::from_white_alpha(60), t)),
+                p.on_accent,
+            ),
+            Kind::Secondary => (mix(p.surface_hi, hover_bg, t), Stroke::new(1.0_f32, mix(p.border, p.accent, t * 0.8)), p.text),
+            Kind::Ghost => (mix(Color32::TRANSPARENT, hover_bg, t), Stroke::NONE, mix(p.weak, p.text, t)),
+            Kind::Card => (mix(p.surface, mix(p.surface, p.accent, 0.08), t), Stroke::new(1.0_f32, mix(p.border, p.accent, t)), p.text),
+        };
+        let (fill, text_color) = if !enabled {
+            (fill.gamma_multiply(0.6), p.weak)
+        } else if pressed {
+            (mix(fill, Color32::BLACK, 0.12), text_color)
+        } else {
+            (fill, text_color)
+        };
+
+        if ui.is_rect_visible(rect) {
+            // cards rise a little when hovered
+            let rect = if self.kind == Kind::Card { rect.translate(egui::vec2(0.0, -1.5 * t)) } else { rect };
+            if self.kind == Kind::Card && t > 0.0 {
+                let shadow = Shadow { offset: egui::vec2(0.0, 4.0), blur: 12.0, spread: 0.0, color: Color32::from_black_alpha((if dark { 70.0 } else { 22.0 } * t) as u8) };
+                ui.painter().add(shadow.as_shape(rect, Rounding::same(self.rounding)));
+            }
+            ui.painter().rect(rect, self.rounding, fill, stroke);
+            let pos = match self.kind {
+                Kind::Card => egui::pos2(rect.left() + self.padding.x, rect.center().y - galley.size().y / 2.0),
+                _ => rect.center() - galley.size() / 2.0,
+            };
+            ui.painter().galley(pos, galley, text_color);
+        }
+        if enabled {
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        } else {
+            resp
+        }
+    }
+}
+
 /// Filled accent button for the main action of a dialog.
 pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
-    let p = of(ui);
-    ui.add(
-        egui::Button::new(egui::RichText::new(text).color(p.on_accent).family(bold()))
-            .fill(p.accent)
-            .rounding(10.0)
-            .min_size(egui::vec2(0.0, 34.0)),
-    )
+    ui.add(Btn::new(Kind::Primary, egui::RichText::new(text).family(bold())))
+}
+
+/// Grey button for other actions.
+pub fn secondary_button(ui: &mut Ui, text: &str) -> Response {
+    ui.add(Btn::new(Kind::Secondary, text))
 }
 
 /// Quiet button that only shows a background on hover.
-pub fn ghost_button(ui: &mut Ui, text: &str) -> Response {
-    ui.add(egui::Button::new(text).frame(false).min_size(egui::vec2(0.0, 32.0)))
+pub fn ghost_button(ui: &mut Ui, text: impl Into<egui::RichText>) -> Response {
+    ui.add(Btn::new(Kind::Ghost, text))
 }
 
 /// Round avatar with the character's initials.
@@ -229,14 +351,20 @@ pub enum RoundIcon {
 pub fn round_button(ui: &mut Ui, icon: RoundIcon, enabled: bool, size: f32) -> Response {
     let p = of(ui);
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), if enabled { Sense::click() } else { Sense::hover() });
-    let hovered = enabled && resp.hovered();
+    let t = hover_anim(ui, resp.id, enabled && resp.hovered());
+    let pressed = enabled && resp.is_pointer_button_down_on();
     let c = rect.center();
     let painter = ui.painter();
     let (fill, fg) = match icon {
-        RoundIcon::Attach => (if hovered { p.surface_hi } else { Color32::TRANSPARENT }, if hovered { p.text } else { p.weak }),
+        RoundIcon::Attach => (mix(Color32::TRANSPARENT, p.accent_soft, t), mix(p.weak, p.accent, t)),
         _ if !enabled => (p.surface_hi, p.weak),
-        _ => (if hovered { p.accent_hover } else { p.accent }, p.on_accent),
+        _ => (mix(p.accent, p.accent_hover, t), p.on_accent),
     };
+    let fill = if pressed { mix(fill, Color32::BLACK, 0.15) } else { fill };
+    // soft glow ring while hovered
+    if enabled && t > 0.0 && !matches!(icon, RoundIcon::Attach) {
+        painter.circle_filled(c, size / 2.0 + 3.0 * t, mix(Color32::TRANSPARENT, p.accent_soft, t));
+    }
     painter.circle_filled(c, size / 2.0, fill);
     let s = size / 40.0;
     let stroke = Stroke::new(2.2 * s, fg);

@@ -384,7 +384,7 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str) {
                 let now = ui.input(|i| i.time);
                 let recently = copied_at.map(|t| now - t < 1.5).unwrap_or(false);
                 let label = if recently { "✔ Copied" } else { "📋 Copy" };
-                let b = egui::Button::new(RichText::new(label).small().color(p.weak)).frame(false);
+                let b = crate::theme::Btn::new(crate::theme::Kind::Ghost, RichText::new(label).small());
                 if ui.add(b).on_hover_text("Copy this code to the clipboard").clicked() {
                     ui.ctx().copy_text(code.to_string());
                     ui.data_mut(|d| d.insert_temp(id, now));
