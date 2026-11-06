@@ -12,7 +12,8 @@ use eframe::egui::{self, Align, Color32, Key, Layout, Modifiers, RichText, Round
 
 use crate::ais::{self, Attachment, AttachmentData, ChatMessage, Event, Role};
 use crate::conversations::{self, Conversation, FileState, PendingFile};
-use crate::markdown;
+use crate::github;
+use crate::markdown::{self, PushState};
 use crate::theme;
 use crate::settings::{Settings, DEFAULT_INVITE_LINK};
 
@@ -26,6 +27,10 @@ enum Msg {
     Refreshed { result: Result<(Settings, String), String>, from_settings: bool },
     /// A worker had to read fresh values from the site while sending.
     SettingsChanged(Settings),
+    /// A GitHub push finished; `keys` are the code blocks it carried (`<message id>#<n>`).
+    Pushed { keys: Vec<String>, result: Result<String, String> },
+    /// "Check access" in Settings finished.
+    GithubChecked(Result<String, String>),
     // `conv` = id of the chat the work belongs to (it may no longer be the open one)
     Uploaded { conv: String, id: u64, result: Result<String, String> },
     Text { conv: String, gen: u64, text: String },
@@ -68,6 +73,10 @@ pub struct App {
     draft: Settings,
     settings_note: Option<(bool, String)>,
     connecting_from_settings: bool,
+    github_note: Option<(bool, String)>,
+    github_checking: bool,
+    /// GitHub state of code blocks, by `<message id>#<n>`.
+    push_states: std::collections::HashMap<String, PushState>,
 
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
@@ -100,6 +109,9 @@ impl App {
             curl_input: String::new(),
             settings_note: None,
             connecting_from_settings: false,
+            github_note: None,
+            github_checking: false,
+            push_states: Default::default(),
             tx,
             rx,
             ctx: cc.egui_ctx.clone(),
@@ -356,6 +368,22 @@ impl App {
                         }
                     }
                 }
+                Msg::Pushed { keys, result } => {
+                    let state = match result {
+                        Ok(url) => PushState::Done(url),
+                        Err(e) => PushState::Failed(e),
+                    };
+                    for k in keys {
+                        self.push_states.insert(k, state.clone());
+                    }
+                }
+                Msg::GithubChecked(result) => {
+                    self.github_checking = false;
+                    self.github_note = Some(match result {
+                        Ok(t) => (true, t),
+                        Err(e) => (false, e),
+                    });
+                }
                 Msg::SettingsChanged(s) => {
                     self.apply_settings(s);
                     self.conn = Conn::Ready;
@@ -394,6 +422,11 @@ impl App {
                         c.error = Some(e);
                     } else {
                         self.conn = Conn::Ready;
+                        // automatic mode: save the answer's code right away
+                        let answer = c.messages.last().filter(|m| m.role == Role::Assistant).map(|m| m.id.clone());
+                        if let Some(answer) = answer.filter(|_| self.settings.github_ready() && self.settings.github_auto) {
+                            self.push_code(&conv, &answer, None);
+                        }
                     }
                     self.save_chats();
                 }
@@ -598,6 +631,146 @@ impl App {
         action
     }
 
+    /// Save code from an answer to GitHub: block `only` of message `msg` in chat `conv`, or
+    /// all its code blocks.
+    fn push_code(&mut self, conv: &str, msg: &str, only: Option<usize>) {
+        if !self.settings.github_ready() {
+            return;
+        }
+        let Some(ci) = self.convs.iter().position(|c| c.id == conv) else { return };
+        let Some(m) = self.convs[ci].messages.iter().find(|m| m.id == msg) else { return };
+        let blocks = markdown::code_blocks(&m.content);
+        let chosen: Vec<(usize, &markdown::CodeBlockInfo)> =
+            blocks.iter().enumerate().filter(|(n, _)| only.map_or(true, |o| o == *n)).collect();
+        if chosen.is_empty() {
+            return;
+        }
+        // the chat's folder is fixed at its first push; two chats never share one
+        let dir = match self.convs[ci].github_dir.clone() {
+            Some(d) => d,
+            None => {
+                let base = github::slug(&self.convs[ci].title());
+                let taken = |d: &str| self.convs.iter().any(|c| c.github_dir.as_deref() == Some(d));
+                let mut d = base.clone();
+                let mut k = 2;
+                while taken(&d) {
+                    d = format!("{base}-{k}");
+                    k += 1;
+                }
+                self.convs[ci].github_dir = Some(d.clone());
+                d
+            }
+        };
+        let files = github::files_for(&chosen, &self.settings.github_folder(), &dir);
+        let keys: Vec<String> = chosen.iter().map(|(n, _)| format!("{msg}#{n}")).collect();
+        let names: Vec<&str> = files.iter().map(|f| f.path.rsplit('/').next().unwrap_or(&f.path)).collect();
+        let message = format!("{}: {}\n\nSaved from the AIS.chat client.", self.convs[ci].title(), names.join(", "));
+        for k in &keys {
+            self.push_states.insert(k.clone(), PushState::Pushing);
+        }
+        let cfg = self.settings.github_config();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = github::push(&cfg, &files, &message).map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Pushed { keys, result });
+            ctx.request_repaint();
+        });
+        self.save_chats();
+    }
+
+    fn check_github(&mut self) {
+        self.github_checking = true;
+        self.github_note = None;
+        let cfg = self.settings.github_config();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::GithubChecked(github::check(&cfg).map_err(|e| e.to_string())));
+            ctx.request_repaint();
+        });
+    }
+
+    /// The optional GitHub section of the Settings window.
+    fn github_settings(&mut self, ui: &mut egui::Ui, p: theme::Palette) {
+        let mut enabled = self.settings.github_enabled;
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(RichText::new("GitHub (optional)").family(theme::bold()).color(p.text));
+                ui.label(RichText::new("Save code from answers to your own repository.").small().color(p.weak));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let tip = if enabled { "Switch GitHub off" } else { "Switch GitHub on" };
+                theme::toggle(ui, &mut enabled).on_hover_text(tip);
+            });
+        });
+        if enabled != self.settings.github_enabled {
+            let mut s = self.settings.clone();
+            s.github_enabled = enabled;
+            self.draft.github_enabled = enabled;
+            self.apply_settings(s);
+        }
+        if !enabled {
+            return;
+        }
+        ui.add_space(4.0);
+        egui::Grid::new("github").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            let w = 360.0;
+            ui.label("Repository");
+            ui.add(egui::TextEdit::singleline(&mut self.draft.github_repo).hint_text("owner/name").desired_width(w));
+            ui.end_row();
+            ui.label("Token");
+            ui.add(egui::TextEdit::singleline(&mut self.draft.github_token).password(true).hint_text("github_pat_…").desired_width(w))
+                .on_hover_text("Stored in settings.json on this computer.");
+            ui.end_row();
+            ui.label("Branch");
+            ui.add(egui::TextEdit::singleline(&mut self.draft.github_branch).hint_text("default branch").desired_width(w));
+            ui.end_row();
+            ui.label("Folder");
+            ui.add(egui::TextEdit::singleline(&mut self.draft.github_folder).hint_text("ais-chat").desired_width(w))
+                .on_hover_text("Each chat gets its own sub-folder in here. \"/\" = the top level of the repository.");
+            ui.end_row();
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Create a token:").small().color(p.weak));
+            ui.hyperlink_to(RichText::new("github.com → Fine-grained token").small(), "https://github.com/settings/personal-access-tokens/new")
+                .on_hover_text("Repository access: only this repository · Permissions: Contents → Read and write");
+        });
+        ui.add_space(2.0);
+        let mut auto = self.settings.github_auto;
+        ui.radio_value(&mut auto, false, "Only when I click ⬆ GitHub on a code block");
+        ui.radio_value(&mut auto, true, "Automatically after every answer that contains code");
+        if auto != self.settings.github_auto {
+            let mut s = self.settings.clone();
+            s.github_auto = auto;
+            self.draft.github_auto = auto;
+            self.apply_settings(s);
+        }
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let label = if self.github_checking { "Checking…" } else { "Save & check access" };
+            let b = ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(!self.github_checking));
+            if b.clicked() {
+                let mut s = self.settings.clone();
+                s.github_repo = github::normalize_repo(&self.draft.github_repo).unwrap_or_else(|| self.draft.github_repo.trim().to_string());
+                s.github_token = self.draft.github_token.trim().to_string();
+                s.github_branch = self.draft.github_branch.trim().to_string();
+                s.github_folder = self.draft.github_folder.trim().to_string();
+                self.draft.github_repo = s.github_repo.clone();
+                self.apply_settings(s);
+                self.check_github();
+            }
+            if self.github_checking {
+                ui.add(egui::Spinner::new().size(16.0));
+            }
+        });
+        if let Some((ok, note)) = &self.github_note {
+            let c = if *ok { p.success } else { p.danger };
+            ui.add(egui::Label::new(RichText::new(if *ok { format!("✔ {note}") } else { format!("⚠ {note}") }).color(c)).wrap());
+        }
+    }
+
     fn open_settings(&mut self) {
         self.draft = self.settings.clone();
         self.link_input = self.settings.invite_link.clone();
@@ -787,11 +960,22 @@ impl App {
                     }
                     let name = self.settings.display_name();
                     let last = self.messages.len().saturating_sub(1);
+                    let github = self.settings.github_ready();
+                    let mut push = None;
                     for (i, m) in self.messages.iter().enumerate() {
                         let waiting = self.busy && i == last && m.role == Role::Assistant && m.content.is_empty();
-                        let activity = if self.busy && i == last { self.activity.as_str() } else { "" };
-                        message_row(ui, m, &name, waiting, activity, p);
+                        let streaming = self.busy && i == last;
+                        let activity = if streaming { self.activity.as_str() } else { "" };
+                        // GitHub buttons once the answer is complete
+                        let states = (github && !streaming && !m.initial).then_some(&self.push_states);
+                        if let Some(n) = message_row(ui, m, &name, waiting, activity, p, states) {
+                            push = Some((m.id.clone(), n));
+                        }
                         ui.add_space(14.0);
+                    }
+                    if let Some((msg, n)) = push {
+                        let conv = self.id.clone();
+                        self.push_code(&conv, &msg, Some(n));
                     }
                     ui.add_space(8.0);
                 });
@@ -857,7 +1041,9 @@ impl App {
             .collapsible(false)
             .resizable(false)
             .order(egui::Order::Foreground)
-            .fixed_size([520.0, 0.0])
+            .default_width(520.0)
+            .min_width(520.0)
+            .max_width(520.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -869,168 +1055,178 @@ impl App {
                     });
                 });
                 ui.add_space(6.0);
+                // the contents scroll when the window is too small for them
+                let max_h = (ctx.screen_rect().height() - 190.0).max(200.0);
+                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
 
-                section(ui, p, |ui| {
-                    ui.label(RichText::new("Invite link").family(theme::bold()).color(p.text));
-                    ui.label(RichText::new("Paste the link of the shared chat. Everything else is set up automatically.").small().color(p.weak));
-                    ui.add_space(2.0);
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut self.link_input)
-                            .hint_text("https://app.ais-chat.schule/ua/characters/…/dialog?inviteCode=…")
-                            .margin(egui::Margin::symmetric(10.0, 8.0))
-                            .desired_width(f32::INFINITY),
-                    );
-                    let pressed_enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        let label = if self.connecting_from_settings { "Connecting…" } else { "Connect" };
-                        let connect = ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(!self.connecting_from_settings));
-                        if (connect.clicked() || pressed_enter) && !self.connecting_from_settings {
-                            self.connect_from_settings();
-                        }
-                        if theme::secondary_button(ui, "Use class link").on_hover_text(DEFAULT_INVITE_LINK).clicked() {
-                            self.link_input = DEFAULT_INVITE_LINK.to_string();
-                            self.connect_from_settings();
-                        }
-                        if self.connecting_from_settings {
-                            ui.add(egui::Spinner::new().size(16.0));
+                    section(ui, p, |ui| {
+                        ui.label(RichText::new("Invite link").family(theme::bold()).color(p.text));
+                        ui.label(RichText::new("Paste the link of the shared chat. Everything else is set up automatically.").small().color(p.weak));
+                        ui.add_space(2.0);
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut self.link_input)
+                                .hint_text("https://app.ais-chat.schule/ua/characters/…/dialog?inviteCode=…")
+                                .margin(egui::Margin::symmetric(10.0, 8.0))
+                                .desired_width(f32::INFINITY),
+                        );
+                        let pressed_enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let label = if self.connecting_from_settings { "Connecting…" } else { "Connect" };
+                            let connect = ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(!self.connecting_from_settings));
+                            if (connect.clicked() || pressed_enter) && !self.connecting_from_settings {
+                                self.connect_from_settings();
+                            }
+                            if theme::secondary_button(ui, "Use class link").on_hover_text(DEFAULT_INVITE_LINK).clicked() {
+                                self.link_input = DEFAULT_INVITE_LINK.to_string();
+                                self.connect_from_settings();
+                            }
+                            if self.connecting_from_settings {
+                                ui.add(egui::Spinner::new().size(16.0));
+                            }
+                        });
+                        if let Some((ok, note)) = &self.settings_note {
+                            let c = if *ok { p.success } else { p.danger };
+                            ui.label(RichText::new(if *ok { format!("✔ {note}") } else { format!("⚠ {note}") }).color(c));
                         }
                     });
-                    if let Some((ok, note)) = &self.settings_note {
-                        let c = if *ok { p.success } else { p.danger };
-                        ui.label(RichText::new(if *ok { format!("✔ {note}") } else { format!("⚠ {note}") }).color(c));
-                    }
-                });
 
-                if self.settings.is_ready() {
+                    if self.settings.is_ready() {
+                        ui.add_space(8.0);
+                        section(ui, p, |ui| {
+                            ui.horizontal(|ui| {
+                                theme::avatar(ui, &self.settings.display_name(), 32.0);
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    ui.label(RichText::new(self.settings.display_name()).family(theme::bold()).color(p.text));
+                                    let upload = if self.settings.upload_url.trim().is_empty() { "automatic" } else { "custom address" };
+                                    ui.label(RichText::new(format!("Connected · file upload {upload}")).small().color(p.weak))
+                                        .on_hover_text(self.settings.upload_endpoint());
+                                });
+                            });
+                        });
+                    }
+
                     ui.add_space(8.0);
                     section(ui, p, |ui| {
                         ui.horizontal(|ui| {
-                            theme::avatar(ui, &self.settings.display_name(), 32.0);
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 2.0;
-                                ui.label(RichText::new(self.settings.display_name()).family(theme::bold()).color(p.text));
-                                let upload = if self.settings.upload_url.trim().is_empty() { "automatic" } else { "custom address" };
-                                ui.label(RichText::new(format!("Connected · file upload {upload}")).small().color(p.weak))
-                                    .on_hover_text(self.settings.upload_endpoint());
-                            });
-                        });
-                    });
-                }
-
-                ui.add_space(8.0);
-                section(ui, p, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Appearance").family(theme::bold()).color(p.text));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let current = self.settings.appearance.clone();
-                            let mut choice = if current.is_empty() { "system".to_string() } else { current.clone() };
-                            for (value, label) in [("dark", "Dark"), ("light", "Light"), ("system", "System")] {
-                                ui.selectable_value(&mut choice, value.to_string(), label);
-                            }
-                            if choice != current && !(current.is_empty() && choice == "system") {
-                                theme::set_appearance(ui.ctx(), &choice);
-                                let mut s = self.settings.clone();
-                                s.appearance = choice.clone();
-                                self.draft.appearance = choice;
-                                self.apply_settings(s);
-                            }
-                        });
-                    });
-                });
-
-                ui.add_space(8.0);
-                section(ui, p, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            ui.label(RichText::new("Answer language").family(theme::bold()).color(p.text));
-                            ui.label(RichText::new("Sent as a hidden note with every message.").small().color(p.weak));
-                        });
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let current = self.settings.language.clone();
-                            let shown = crate::settings::language(&current).map(|(n, _)| n).unwrap_or("Automatic");
-                            let mut choice = current.clone();
-                            egui::ComboBox::from_id_salt("answer-language").selected_text(shown).width(170.0).height(480.0).show_ui(ui, |ui| {
-                                ui.selectable_value(&mut choice, String::new(), "Automatic")
-                                    .on_hover_text("No note: the bot chooses (usually the language you write in)");
-                                for (code, native, english) in crate::settings::LANGUAGES {
-                                    ui.selectable_value(&mut choice, code.to_string(), *native).on_hover_text(*english);
+                            ui.label(RichText::new("Appearance").family(theme::bold()).color(p.text));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let current = self.settings.appearance.clone();
+                                let mut choice = if current.is_empty() { "system".to_string() } else { current.clone() };
+                                for (value, label) in [("dark", "Dark"), ("light", "Light"), ("system", "System")] {
+                                    ui.selectable_value(&mut choice, value.to_string(), label);
+                                }
+                                if choice != current && !(current.is_empty() && choice == "system") {
+                                    theme::set_appearance(ui.ctx(), &choice);
+                                    let mut s = self.settings.clone();
+                                    s.appearance = choice.clone();
+                                    self.draft.appearance = choice;
+                                    self.apply_settings(s);
                                 }
                             });
-                            if choice != current {
-                                let mut s = self.settings.clone();
-                                s.language = choice.clone();
-                                self.draft.language = choice;
-                                self.apply_settings(s);
-                            }
                         });
                     });
-                });
 
-                ui.add_space(8.0);
-                egui::CollapsingHeader::new(RichText::new("Advanced (only needed if something does not work)").color(p.weak)).show(ui, |ui| {
-                    egui::Grid::new("adv").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                        let auto_upload = {
-                            let mut d = self.draft.clone();
-                            d.upload_url.clear();
-                            d.upload_endpoint()
-                        };
-                        ui.label("Upload address");
-                        ui.add(egui::TextEdit::singleline(&mut self.draft.upload_url).hint_text(format!("automatic: {auto_upload}")).desired_width(330.0))
-                            .on_hover_text("Leave empty: files go to the address that belongs to the invite link.");
-                        ui.end_row();
-                        ui.label("next-action");
-                        ui.add(egui::TextEdit::singleline(&mut self.draft.next_action).desired_width(330.0));
-                        ui.end_row();
-                        ui.label("Deployment id");
-                        ui.add(egui::TextEdit::singleline(&mut self.draft.deployment_id).desired_width(330.0));
-                        ui.end_row();
-                        ui.label("User agent");
-                        ui.add(egui::TextEdit::singleline(&mut self.draft.user_agent).hint_text("built in").desired_width(330.0));
-                        ui.end_row();
-                    });
-                    ui.horizontal(|ui| {
-                        if theme::secondary_button(ui, "Save these values").clicked() {
-                            let s = self.draft.clone();
-                            self.apply_settings(s);
-                            self.settings_note = Some((true, "Saved.".into()));
-                        }
-                        if theme::secondary_button(ui, "Detect again").on_hover_text("Read the current values from the AIS.chat page").clicked() {
-                            self.draft.next_action.clear();
-                            self.start_refresh(true);
-                        }
+                    ui.add_space(8.0);
+                    section(ui, p, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.label(RichText::new("Answer language").family(theme::bold()).color(p.text));
+                                ui.label(RichText::new("Sent as a hidden note with every message.").small().color(p.weak));
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let current = self.settings.language.clone();
+                                let shown = crate::settings::language(&current).map(|(n, _)| n).unwrap_or("Automatic");
+                                let mut choice = current.clone();
+                                egui::ComboBox::from_id_salt("answer-language").selected_text(shown).width(170.0).height(480.0).show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut choice, String::new(), "Automatic")
+                                        .on_hover_text("No note: the bot chooses (usually the language you write in)");
+                                    for (code, native, english) in crate::settings::LANGUAGES {
+                                        ui.selectable_value(&mut choice, code.to_string(), *native).on_hover_text(*english);
+                                    }
+                                });
+                                if choice != current {
+                                    let mut s = self.settings.clone();
+                                    s.language = choice.clone();
+                                    self.draft.language = choice;
+                                    self.apply_settings(s);
+                                }
+                            });
+                        });
                     });
 
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("Import from a cURL").family(theme::bold()).color(p.text));
-                    ui.label(
-                        RichText::new(
-                            "Only if Connect fails: in the browser press F12 → Network, send a message, right-click the \
-                             dialog?inviteCode=… request → Copy → Copy as cURL, and paste it here.",
-                        )
-                        .small()
-                        .color(p.weak),
-                    );
-                    ui.add(egui::TextEdit::multiline(&mut self.curl_input).desired_rows(3).desired_width(f32::INFINITY));
-                    if theme::secondary_button(ui, "Import").clicked() {
-                        let mut s = self.draft.clone();
-                        match s.import_curl(&self.curl_input) {
-                            Ok(summary) => {
-                                self.curl_input.clear();
-                                self.link_input = s.invite_link.clone();
-                                self.draft = s.clone();
+                    ui.add_space(8.0);
+                    section(ui, p, |ui| self.github_settings(ui, p));
+
+                    ui.add_space(8.0);
+                    egui::CollapsingHeader::new(RichText::new("Advanced (only needed if something does not work)").color(p.weak)).show(ui, |ui| {
+                        egui::Grid::new("adv").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                            let auto_upload = {
+                                let mut d = self.draft.clone();
+                                d.upload_url.clear();
+                                d.upload_endpoint()
+                            };
+                            ui.label("Upload address");
+                            ui.add(egui::TextEdit::singleline(&mut self.draft.upload_url).hint_text(format!("automatic: {auto_upload}")).desired_width(330.0))
+                                .on_hover_text("Leave empty: files go to the address that belongs to the invite link.");
+                            ui.end_row();
+                            ui.label("next-action");
+                            ui.add(egui::TextEdit::singleline(&mut self.draft.next_action).desired_width(330.0));
+                            ui.end_row();
+                            ui.label("Deployment id");
+                            ui.add(egui::TextEdit::singleline(&mut self.draft.deployment_id).desired_width(330.0));
+                            ui.end_row();
+                            ui.label("GitHub API");
+                            ui.add(egui::TextEdit::singleline(&mut self.draft.github_api).hint_text("https://api.github.com").desired_width(330.0))
+                                .on_hover_text("Only for GitHub Enterprise: https://your-host/api/v3");
+                            ui.end_row();
+                            ui.label("User agent");
+                            ui.add(egui::TextEdit::singleline(&mut self.draft.user_agent).hint_text("built in").desired_width(330.0));
+                            ui.end_row();
+                        });
+                        ui.horizontal(|ui| {
+                            if theme::secondary_button(ui, "Save these values").clicked() {
+                                let s = self.draft.clone();
                                 self.apply_settings(s);
-                                self.conn = Conn::Ready;
-                                self.settings_note = Some((true, summary));
+                                self.settings_note = Some((true, "Saved.".into()));
                             }
-                            Err(e) => self.settings_note = Some((false, e.to_string())),
-                        }
-                    }
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(format!("Settings file: {}", Settings::path_display())).small().color(p.weak));
-                });
+                            if theme::secondary_button(ui, "Detect again").on_hover_text("Read the current values from the AIS.chat page").clicked() {
+                                self.draft.next_action.clear();
+                                self.start_refresh(true);
+                            }
+                        });
 
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Import from a cURL").family(theme::bold()).color(p.text));
+                        ui.label(
+                            RichText::new(
+                                "Only if Connect fails: in the browser press F12 → Network, send a message, right-click the \
+                                 dialog?inviteCode=… request → Copy → Copy as cURL, and paste it here.",
+                            )
+                            .small()
+                            .color(p.weak),
+                        );
+                        ui.add(egui::TextEdit::multiline(&mut self.curl_input).desired_rows(3).desired_width(f32::INFINITY));
+                        if theme::secondary_button(ui, "Import").clicked() {
+                            let mut s = self.draft.clone();
+                            match s.import_curl(&self.curl_input) {
+                                Ok(summary) => {
+                                    self.curl_input.clear();
+                                    self.link_input = s.invite_link.clone();
+                                    self.draft = s.clone();
+                                    self.apply_settings(s);
+                                    self.conn = Conn::Ready;
+                                    self.settings_note = Some((true, summary));
+                                }
+                                Err(e) => self.settings_note = Some((false, e.to_string())),
+                            }
+                        }
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(format!("Settings file: {}", Settings::path_display())).small().color(p.weak));
+                    });
+                });
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1202,7 +1398,18 @@ fn centered_column<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
     .inner
 }
 
-fn message_row(ui: &mut egui::Ui, m: &ChatMessage, name: &str, waiting: bool, activity: &str, p: theme::Palette) {
+/// Draws one message. With `push_states`, code blocks get a GitHub button; returns the number of
+/// the code block whose button was clicked.
+fn message_row(
+    ui: &mut egui::Ui,
+    m: &ChatMessage,
+    name: &str,
+    waiting: bool,
+    activity: &str,
+    p: theme::Palette,
+    push_states: Option<&std::collections::HashMap<String, PushState>>,
+) -> Option<usize> {
+    let mut clicked = None;
     // gentle fade-in for new messages
     let t = (m.born.elapsed().as_secs_f32() / 0.25).min(1.0);
     if t < 1.0 {
@@ -1301,7 +1508,14 @@ fn message_row(ui: &mut egui::Ui, m: &ChatMessage, name: &str, waiting: bool, ac
                                 });
                                 return;
                             }
-                            markdown::show(ui, m.display.as_deref().unwrap_or(&m.content), &m.id);
+                            let text = m.display.as_deref().unwrap_or(&m.content);
+                            match push_states {
+                                Some(states) => {
+                                    let lookup = |n: usize| states.get(&format!("{}#{n}", m.id)).cloned().unwrap_or(PushState::Idle);
+                                    clicked = markdown::show_with(ui, text, &m.id, Some(&lookup));
+                                }
+                                None => markdown::show(ui, text, &m.id),
+                            }
                             if !activity.is_empty() {
                                 ui.horizontal(|ui| {
                                     theme::typing_dots(ui);
@@ -1329,6 +1543,7 @@ fn message_row(ui: &mut egui::Ui, m: &ChatMessage, name: &str, waiting: bool, ac
             });
         }
     }
+    clicked
 }
 
 /// A card inside the Settings dialog.

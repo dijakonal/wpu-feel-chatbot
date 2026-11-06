@@ -244,25 +244,96 @@ fn merge_block(b: Block) -> Block {
 
 // ------------------------------------------------------------------ drawing
 
+/// GitHub state of one code block (the ⬆ button in its header).
+#[derive(Clone, Debug, PartialEq)]
+pub enum PushState {
+    Idle,
+    Pushing,
+    /// Link to the commit.
+    Done(String),
+    Failed(String),
+}
+
+/// Per code block (numbered in document order): its GitHub state. `None` = no GitHub button.
+pub type PushLookup<'a> = &'a dyn Fn(usize) -> PushState;
+
+struct Render<'a> {
+    push: Option<PushLookup<'a>>,
+    next_code: usize,
+    clicked: Option<usize>,
+}
+
 /// Draw `md` into `ui`. `id` must be unique per message (it keys the code blocks' state).
 pub fn show(ui: &mut Ui, md: &str, id: impl std::hash::Hash) {
+    show_with(ui, md, id, None);
+}
+
+/// Like [`show`], with a "⬆ GitHub" button on every code block. Returns the number of the code
+/// block whose button was clicked.
+pub fn show_with(ui: &mut Ui, md: &str, id: impl std::hash::Hash, push: Option<PushLookup>) -> Option<usize> {
     let blocks = parse(md);
+    let mut r = Render { push, next_code: 0, clicked: None };
     ui.push_id(id, |ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
         for (i, b) in blocks.iter().enumerate() {
-            ui.push_id(i, |ui| block(ui, b));
+            ui.push_id(i, |ui| block(ui, b, &mut r));
         }
     });
+    r.clicked
 }
 
-fn block(ui: &mut Ui, b: &Block) {
+/// A code block of an answer, in document order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeBlockInfo {
+    pub lang: String,
+    pub code: String,
+    /// Text of the paragraph or heading right before the block (it often names the file).
+    pub before: String,
+}
+
+pub fn code_blocks(md: &str) -> Vec<CodeBlockInfo> {
+    fn plain(items: &[Inline]) -> String {
+        items
+            .iter()
+            .map(|i| match i {
+                Inline::Text { text, .. } | Inline::Link { text, .. } => text.as_str(),
+                Inline::Break => " ",
+            })
+            .collect()
+    }
+    fn walk(blocks: &[Block], before: &mut String, out: &mut Vec<CodeBlockInfo>) {
+        for b in blocks {
+            match b {
+                Block::Paragraph(i) | Block::Heading(_, i) => *before = plain(i),
+                Block::Code { lang, code } => {
+                    out.push(CodeBlockInfo { lang: lang.clone(), code: code.clone(), before: std::mem::take(before) })
+                }
+                Block::List { items, .. } => items.iter().for_each(|item| walk(item, before, out)),
+                Block::Quote(inner) => walk(inner, before, out),
+                Block::Table { .. } | Block::Rule => before.clear(),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&parse(md), &mut String::new(), &mut out);
+    out
+}
+
+fn block(ui: &mut Ui, b: &Block, r: &mut Render) {
     match b {
         Block::Paragraph(inl) => inlines(ui, inl),
         Block::Heading(_, inl) => {
             ui.add_space(4.0);
             inlines(ui, inl);
         }
-        Block::Code { lang, code } => code_block(ui, lang, code),
+        Block::Code { lang, code } => {
+            let n = r.next_code;
+            r.next_code += 1;
+            let state = r.push.map(|f| f(n));
+            if code_block(ui, lang, code, state) {
+                r.clicked = Some(n);
+            }
+        }
         Block::List { start, items } => {
             for (n, item) in items.iter().enumerate() {
                 ui.horizontal_top(|ui| {
@@ -274,7 +345,7 @@ fn block(ui: &mut Ui, b: &Block) {
                     ui.add_sized([18.0, 0.0], egui::Label::new(RichText::new(marker).family(crate::theme::bold()).color(accent)));
                     ui.vertical(|ui| {
                         for (j, b) in item.iter().enumerate() {
-                            ui.push_id((n, j), |ui| block(ui, b));
+                            ui.push_id((n, j), |ui| block(ui, b, r));
                         }
                     });
                 });
@@ -288,7 +359,7 @@ fn block(ui: &mut Ui, b: &Block) {
                 .show(ui, |ui| {
                     let r = ui.vertical(|ui| {
                         for (j, b) in inner.iter().enumerate() {
-                            ui.push_id(j, |ui| block(ui, b));
+                            ui.push_id(j, |ui| block(ui, b, r));
                         }
                     });
                     let rect = r.response.rect;
@@ -408,8 +479,10 @@ fn inline_items(ui: &mut Ui, items: &[Inline], wrap: bool) {
     }
 }
 
-fn code_block(ui: &mut Ui, lang: &str, code: &str) {
+/// Returns true when the "⬆ GitHub" button was clicked.
+fn code_block(ui: &mut Ui, lang: &str, code: &str, push: Option<PushState>) -> bool {
     let p = crate::theme::of(ui);
+    let mut push_clicked = false;
     egui::Frame::none()
         .fill(p.code_bg)
         .stroke(egui::Stroke::new(1.0_f32, p.border))
@@ -433,12 +506,39 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str) {
                 if recently {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
                 }
+                if let Some(state) = &push {
+                    let ghost = |text: RichText| crate::theme::Btn::new(crate::theme::Kind::Ghost, text.small());
+                    match state {
+                        PushState::Idle => {
+                            if ui.add(ghost(RichText::new("⬆ GitHub"))).on_hover_text("Save this code to your GitHub repository").clicked() {
+                                push_clicked = true;
+                            }
+                        }
+                        PushState::Pushing => {
+                            ui.label(RichText::new("Pushing…").small().color(p.weak));
+                            ui.add(egui::Spinner::new().size(12.0));
+                        }
+                        PushState::Done(url) => {
+                            let r = ui.add(ghost(RichText::new("✔ On GitHub").color(p.success)));
+                            if r.on_hover_text(format!("Saved to GitHub – click to open the commit:\n{url}")).clicked() {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                            }
+                        }
+                        PushState::Failed(e) => {
+                            let r = ui.add(ghost(RichText::new("⚠ Retry GitHub").color(p.danger)));
+                            if r.on_hover_text(format!("Pushing failed: {e}\nClick to try again")).clicked() {
+                                push_clicked = true;
+                            }
+                        }
+                    }
+                }
             });
         });
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.add(egui::Label::new(RichText::new(code).text_style(TextStyle::Monospace)).extend());
         });
     });
+    push_clicked
 }
 
 #[cfg(test)]
@@ -477,6 +577,18 @@ mod tests {
         let Block::Paragraph(inl) = &b[0] else { panic!() };
         assert_eq!(inl.len(), 3, "{inl:?}");
         assert!(matches!(&inl[0], Inline::Text { text, .. } if text == "Mit zahlen[0] greifst du "));
+    }
+
+    #[test]
+    fn lists_code_blocks_with_text_before() {
+        let md = "Save this as `main.py`:\n\n```python\nprint(1)\n```\n\n- Then **style.css**:\n\n  ```css\nbody{}\n  ```\n\n| a |\n|---|\n| b |\n\n```\nraw\n```";
+        let blocks = code_blocks(md);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].lang, "python");
+        assert_eq!(blocks[0].before, "Save this as main.py:");
+        assert_eq!(blocks[1].lang, "css");
+        assert!(blocks[1].before.contains("style.css"));
+        assert_eq!(blocks[2].before, "", "a table in between clears the hint");
     }
 
     #[test]

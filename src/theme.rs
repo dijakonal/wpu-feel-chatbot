@@ -334,6 +334,23 @@ pub fn initials(name: &str) -> String {
     }
 }
 
+/// On/off switch. Returns the response; `on` is flipped when clicked.
+pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
+    let p = of(ui);
+    let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(40.0, 22.0), Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let t = ui.ctx().animate_bool_with_time(resp.id, *on, 0.15);
+    let hover = hover_anim(ui, resp.id, resp.hovered());
+    let track = mix(mix(p.surface_hi, p.border, 0.6 + 0.4 * hover), p.accent, t);
+    ui.painter().rect_filled(rect, 11.0, track);
+    let x = egui::lerp((rect.left() + 11.0)..=(rect.right() - 11.0), t);
+    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, Color32::WHITE);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Coloured status dot.
 pub fn dot(ui: &mut Ui, color: Color32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());

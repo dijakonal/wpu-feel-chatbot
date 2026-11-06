@@ -43,6 +43,21 @@ pub struct Settings {
     pub appearance: String,
     /// Language the bot should answer in, as a code from [`LANGUAGES`]; empty = automatic.
     pub language: String,
+
+    // ---- optional: save code from answers to GitHub
+    pub github_enabled: bool,
+    /// `owner/name`
+    pub github_repo: String,
+    /// Personal access token (fine-grained, "Contents: Read and write" for the repository).
+    pub github_token: String,
+    /// Empty = the repository's default branch.
+    pub github_branch: String,
+    /// Folder in the repository; empty = `ais-chat`, `/` = the top level.
+    pub github_folder: String,
+    /// Push every answer with code automatically (otherwise only with the ⬆ button).
+    pub github_auto: bool,
+    /// Empty = https://api.github.com (GitHub Enterprise: https://host/api/v3).
+    pub github_api: String,
 }
 
 /// Answer languages: (code, name in the language itself, English name).
@@ -65,6 +80,28 @@ pub fn language(code: &str) -> Option<(&'static str, &'static str)> {
 }
 
 impl Settings {
+    pub fn github_config(&self) -> crate::github::Config {
+        crate::github::Config {
+            token: self.github_token.clone(),
+            repo: self.github_repo.clone(),
+            branch: self.github_branch.clone(),
+            api: self.github_api.clone(),
+        }
+    }
+
+    /// GitHub is switched on and has a repository and a token.
+    pub fn github_ready(&self) -> bool {
+        self.github_enabled && crate::github::normalize_repo(&self.github_repo).is_some() && !self.github_token.trim().is_empty()
+    }
+
+    pub fn github_folder(&self) -> String {
+        match self.github_folder.trim() {
+            "" => "ais-chat".to_string(),
+            "/" => String::new(),
+            f => f.trim_matches('/').to_string(),
+        }
+    }
+
     /// The hidden note put in front of the newest message so the bot answers in the chosen
     /// language. `None` when the language is automatic.
     pub fn language_note(&self) -> Option<String> {

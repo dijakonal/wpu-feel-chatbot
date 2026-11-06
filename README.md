@@ -84,6 +84,33 @@ message that is only files.
 Uploaded files are listed again with every message of the chat, because the
 history is re-sent every time as well. They belong to their chat: a new chat starts without them.
 
+## Saving code to GitHub (optional)
+
+Off by default. Switch it on under **⚙ Settings → GitHub (optional)**:
+
+1. Create a **fine-grained personal access token** on GitHub
+   (*Settings → Developer settings → Fine-grained tokens*, or the link in the
+   app): *Repository access* → only your project repository, *Permissions* →
+   **Contents: Read and write**.
+2. Enter the **repository** (`owner/name` or its github.com address) and the
+   **token**. *Branch* (default: the repository's default branch) and *Folder*
+   (default: `ais-chat`, `/` = top level) are optional.
+3. Choose **when**: only when you click **⬆ GitHub** on a code block, or
+   **automatically** after every answer that contains code.
+4. **Save & check access** tells you whether the token can write to the repository.
+
+Each chat gets its own folder (`ais-chat/<chat name>/`), and every push is one
+commit. File names come from the answer when the bot names the file (in a
+first-line comment like `# main.py`, or in the sentence before the code block);
+otherwise the blocks are saved as `code-1.py`, `code-2.js`, … . Saving again
+overwrites the file with the newer version (the old one stays in the history).
+The button turns into **✔ On GitHub** (click it to open the commit) or shows
+what went wrong. Empty repositories and branches that do not exist yet work too.
+
+The token is stored in `settings.json` on this computer – use a token that only
+has access to this one repository, and don't use the app with your token on a
+shared computer.
+
 ## If something does not work
 
 The dot next to the name turns red and a message says why. Usually **Try again**
@@ -129,6 +156,7 @@ Windows and Linux and uploads the binaries as build artifacts.
 | `src/app.rs` | chat window, input box, attachments, Settings window; background threads |
 | `src/ais.rs` | the AIS.chat protocol: request body, streamed-answer decoder, file upload, auto-detection |
 | `src/conversations.rs` | one chat's state, titles, saving/loading the chat list |
+| `src/github.rs` | optional GitHub saving: file names, one commit per push (GitHub REST API) |
 | `src/settings.rs` | invite-link parsing, cURL import, loading/saving settings |
 | `src/markdown.rs` | Markdown → egui renderer |
 | `src/theme.rs` | colours (light/dark), fonts, widget style, avatar / send button / typing dots |
