@@ -1,5 +1,6 @@
 //! Optional: let the bot read a GitHub repository (files are fetched by the app and attached
-//! to the message) and save code from answers to it.
+//! to the message) and save code from answers to it – at the files' own paths, so the
+//! repository's real files are updated.
 //!
 //! Uses the GitHub REST API with a personal access token (a fine-grained token with
 //! "Contents: Read and write" for one repository is enough). All files of one push become one
@@ -348,10 +349,9 @@ fn looks_like_file(t: &str) -> bool {
     ext_ok && stem_ok && stem.len() + ext.len() >= 4 && !matches!(ext.to_lowercase().as_str(), "b" | "g" | "e" | "a" | "com" | "org" | "de")
 }
 
-/// Name for a code block: from a comment on its first line (`# main.py`), else from the text
-/// right before it ("Save this as `main.py`"), else `code-<n>.<ext>`.
-pub fn file_name(block: &CodeBlockInfo, n: usize) -> String {
-    let ext = extension(&block.lang);
+/// The file a code block belongs to, if the answer says so: a comment on its first line
+/// (`# main.py`, `// src/app.js`) or the sentence right before it ("The file `src/main.rs` …").
+pub fn named_file(block: &CodeBlockInfo) -> Option<String> {
     let first_line = block.code.lines().next().unwrap_or("");
     let comment = first_line
         .trim()
@@ -359,57 +359,30 @@ pub fn file_name(block: &CodeBlockInfo, n: usize) -> String {
         .trim_end_matches(['*', '/', '-', '>'])
         .trim();
     let from_comment = if first_line.trim() != comment && comment.split_whitespace().count() <= 3 { find_file_name(comment) } else { None };
-    from_comment.or_else(|| find_file_name(&block.before)).unwrap_or_else(|| format!("code-{}.{ext}", n + 1))
+    from_comment.or_else(|| find_file_name(&block.before)).map(|n| n.trim_start_matches("./").to_string())
 }
 
-/// Folder name for a chat: `Wie baue ich ein Quiz?` → `wie-baue-ich-ein-quiz`.
-pub fn slug(title: &str) -> String {
-    let mut out = String::new();
-    for c in title.to_lowercase().chars() {
-        let mapped = match c {
-            'ä' => "ae".to_string(),
-            'ö' => "oe".to_string(),
-            'ü' => "ue".to_string(),
-            'ß' => "ss".to_string(),
-            c if c.is_ascii_alphanumeric() => c.to_string(),
-            _ => "-".to_string(),
-        };
-        if mapped == "-" && (out.is_empty() || out.ends_with('-')) {
-            continue;
-        }
-        out.push_str(&mapped);
-    }
-    let mut out: String = out.trim_matches('-').chars().take(40).collect();
-    while out.ends_with('-') {
-        out.pop();
-    }
-    if out.is_empty() { "chat".to_string() } else { out }
+/// Path for a code block: the file it belongs to, else `code-<n>.<ext>`.
+pub fn file_name(block: &CodeBlockInfo, n: usize) -> String {
+    named_file(block).unwrap_or_else(|| format!("code-{}.{}", n + 1, extension(&block.lang)))
 }
 
-/// Files for some code blocks of one answer, under `folder/chat_dir/`. Names that occur twice
-/// get `-2`, `-3`, … .
-pub fn files_for(blocks: &[(usize, &CodeBlockInfo)], folder: &str, chat_dir: &str) -> Vec<FileOut> {
+/// Files for some code blocks of one answer, at their own paths in the repository (inside
+/// `folder` if one is set). If the answer contains the same file twice, the later version wins.
+pub fn files_for(blocks: &[(usize, &CodeBlockInfo)], folder: &str) -> Vec<FileOut> {
     let folder = folder.trim().trim_matches('/');
-    let mut seen: Vec<String> = Vec::new();
-    let mut out = Vec::new();
+    let mut out: Vec<FileOut> = Vec::new();
     for (n, b) in blocks {
-        let mut name = file_name(b, *n);
-        if seen.contains(&name) {
-            let (stem, ext) = name.rsplit_once('.').map(|(s, e)| (s.to_string(), e.to_string())).unwrap_or((name.clone(), String::new()));
-            let mut k = 2;
-            while seen.contains(&format!("{stem}-{k}.{ext}")) {
-                k += 1;
-            }
-            name = format!("{stem}-{k}.{ext}");
-        }
-        seen.push(name.clone());
-        let dir = [folder, chat_dir].iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join("/");
-        let path = if dir.is_empty() { name } else { format!("{dir}/{name}") };
+        let name = file_name(b, *n);
+        let path = if folder.is_empty() { name } else { format!("{folder}/{name}") };
         let mut content = b.code.clone();
         if !content.ends_with('\n') {
             content.push('\n');
         }
-        out.push(FileOut { path, content });
+        match out.iter_mut().find(|f| f.path == path) {
+            Some(f) => f.content = content,
+            None => out.push(FileOut { path, content }),
+        }
     }
     out
 }
@@ -449,12 +422,6 @@ mod tests {
         assert_eq!(file_name(&block("python", "# Ein Kommentar über das Programm\nx", "Hier ist der Code, z.B. so:"), 2), "code-3.py");
         assert_eq!(file_name(&block("", "x", "Siehe https://example.com/a.html"), 0), "code-1.txt");
         assert_eq!(file_name(&block("python", "x", "Datei ../../etc/passwd.py"), 0), "code-1.py");
-    }
-
-    #[test]
-    fn slugs() {
-        assert_eq!(slug("Wie baue ich ein Quiz? Für die Schule!"), "wie-baue-ich-ein-quiz-fuer-die-schule");
-        assert_eq!(slug("???"), "chat");
     }
 
     /// A tiny stand-in for the GitHub API: answers each request from `routes` (method, path
@@ -614,16 +581,24 @@ mod tests {
     }
 
     #[test]
-    fn builds_paths_and_avoids_duplicates() {
-        let a = block("python", "print(1)", "");
-        let b = block("python", "print(2)", "");
-        let c = block("css", "# style.css\nbody{}", "");
-        let files = files_for(&[(0, &a), (1, &b), (2, &c)], "/ais-chat/", "quiz");
+    fn files_go_to_their_real_paths() {
+        let main = block("rust", "fn main() {}", "Replace src/main.rs with this:");
+        let toml = block("toml", "# Cargo.toml\n[package]", "");
+        let snippet = block("bash", "git commit -m x", "Then run:");
+        let files = files_for(&[(0, &main), (1, &toml), (2, &snippet)], "");
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, ["ais-chat/quiz/code-1.py", "ais-chat/quiz/code-2.py", "ais-chat/quiz/style.css"]);
-        assert_eq!(files[0].content, "print(1)\n");
-        let same = block("python", "# main.py\nx", "");
-        let dup = files_for(&[(0, &same), (1, &same)], "", "q");
-        assert_eq!(dup[1].path, "q/main-2.py");
+        assert_eq!(paths, ["src/main.rs", "Cargo.toml", "code-3.sh"]);
+        assert_eq!(files[0].content, "fn main() {}\n");
+        assert_eq!(named_file(&snippet), None, "a snippet without a file name is not a file");
+
+        let in_folder = files_for(&[(0, &main)], "/projekt/");
+        assert_eq!(in_folder[0].path, "projekt/src/main.rs");
+
+        let older = block("rust", "// src/lib.rs\nold", "");
+        let newer = block("rust", "// src/lib.rs\nnew", "");
+        let both = files_for(&[(0, &older), (1, &newer)], "");
+        assert_eq!(both.len(), 1, "the same file twice: one file");
+        assert!(both[0].content.contains("new"));
+        assert_eq!(named_file(&block("js", "// ./app.js\nx", "")).as_deref(), Some("app.js"));
     }
 }

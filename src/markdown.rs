@@ -510,7 +510,7 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str, push: Option<PushState>) -> b
                     let ghost = |text: RichText| crate::theme::Btn::new(crate::theme::Kind::Ghost, text.small());
                     match state {
                         PushState::Idle => {
-                            if ui.add(ghost(RichText::new("⬆ GitHub"))).on_hover_text("Save this code to your GitHub repository").clicked() {
+                            if ui.add(ghost(RichText::new("⬆ GitHub"))).on_hover_text("Save this code to your GitHub repository as the file the answer names (it replaces that file; the old version stays in the GitHub history)").clicked() {
                                 push_clicked = true;
                             }
                         }

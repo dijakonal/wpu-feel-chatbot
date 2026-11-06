@@ -38,10 +38,6 @@ pub struct Conversation {
     /// Unsent text in the message box.
     #[serde(default)]
     pub input: String,
-    /// This chat's folder in the GitHub repository (fixed at the first push, so renaming the
-    /// chat does not scatter its files).
-    #[serde(default)]
-    pub github_dir: Option<String>,
 
     // ---- only while the app runs
     #[serde(skip)]
@@ -73,7 +69,6 @@ impl Conversation {
             session_id: ais::new_session_id(),
             updated: now(),
             input: String::new(),
-            github_dir: None,
             pending: Vec::new(),
             gen: 0,
             busy: false,

@@ -52,7 +52,8 @@ pub struct Settings {
     pub github_token: String,
     /// Empty = the repository's default branch.
     pub github_branch: String,
-    /// Folder in the repository; empty = `ais-chat`, `/` = the top level.
+    /// Folder in the repository the files go into; empty (or `/`) = the top level, so a file
+    /// the bot calls `src/main.rs` updates the repository's `src/main.rs`.
     pub github_folder: String,
     /// Push every answer with code automatically (otherwise only with the ⬆ button).
     pub github_auto: bool,
@@ -99,11 +100,7 @@ impl Settings {
     }
 
     pub fn github_folder(&self) -> String {
-        match self.github_folder.trim() {
-            "" => "ais-chat".to_string(),
-            "/" => String::new(),
-            f => f.trim_matches('/').to_string(),
-        }
+        self.github_folder.trim().trim_matches('/').to_string()
     }
 
     /// The greeting shown at the start of a chat, in the answer language if one is chosen and

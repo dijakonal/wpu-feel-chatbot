@@ -723,31 +723,23 @@ impl App {
         let Some(ci) = self.convs.iter().position(|c| c.id == conv) else { return };
         let Some(m) = self.convs[ci].messages.iter().find(|m| m.id == msg) else { return };
         let blocks = markdown::code_blocks(&m.content);
-        let chosen: Vec<(usize, &markdown::CodeBlockInfo)> =
-            blocks.iter().enumerate().filter(|(n, _)| only.map_or(true, |o| o == *n)).collect();
+        // automatically: only blocks the answer names a file for (not command snippets);
+        // a click on one block saves that block either way
+        let chosen: Vec<(usize, &markdown::CodeBlockInfo)> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(n, b)| match only {
+                Some(o) => o == *n,
+                None => github::named_file(b).is_some(),
+            })
+            .collect();
         if chosen.is_empty() {
             return;
         }
-        // the chat's folder is fixed at its first push; two chats never share one
-        let dir = match self.convs[ci].github_dir.clone() {
-            Some(d) => d,
-            None => {
-                let base = github::slug(&self.convs[ci].title());
-                let taken = |d: &str| self.convs.iter().any(|c| c.github_dir.as_deref() == Some(d));
-                let mut d = base.clone();
-                let mut k = 2;
-                while taken(&d) {
-                    d = format!("{base}-{k}");
-                    k += 1;
-                }
-                self.convs[ci].github_dir = Some(d.clone());
-                d
-            }
-        };
-        let files = github::files_for(&chosen, &self.settings.github_folder(), &dir);
+        let files = github::files_for(&chosen, &self.settings.github_folder());
         let keys: Vec<String> = chosen.iter().map(|(n, _)| format!("{msg}#{n}")).collect();
-        let names: Vec<&str> = files.iter().map(|f| f.path.rsplit('/').next().unwrap_or(&f.path)).collect();
-        let message = format!("{}: {}\n\nSaved from the AIS.chat client.", self.convs[ci].title(), names.join(", "));
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        let message = format!("Update {}\n\nSaved from the AIS.chat chat \"{}\".", paths.join(", "), self.convs[ci].title());
         for k in &keys {
             self.push_states.insert(k.clone(), PushState::Pushing);
         }
@@ -1005,8 +997,8 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut self.draft.github_branch).hint_text("default branch").desired_width(w));
             ui.end_row();
             ui.label("Folder");
-            ui.add(egui::TextEdit::singleline(&mut self.draft.github_folder).hint_text("ais-chat").desired_width(w))
-                .on_hover_text("Each chat gets its own sub-folder in here. \"/\" = the top level of the repository.");
+            ui.add(egui::TextEdit::singleline(&mut self.draft.github_folder).hint_text("top level").desired_width(w))
+                .on_hover_text("Empty: files go to their own paths in the repository (src/main.rs updates src/main.rs). Enter a folder to put everything inside it.");
             ui.end_row();
         });
         ui.horizontal(|ui| {
@@ -1017,7 +1009,9 @@ impl App {
         ui.add_space(2.0);
         let mut auto = self.settings.github_auto;
         ui.radio_value(&mut auto, false, "Only when I click ⬆ GitHub on a code block");
-        ui.radio_value(&mut auto, true, "Automatically after every answer that contains code");
+        ui.radio_value(&mut auto, true, "Automatically: every file an answer contains (named code blocks)").on_hover_text(
+            "Careful: if the bot shows only part of a file, the whole file is replaced by that part. GitHub keeps the old version in the history.",
+        );
         if auto != self.settings.github_auto {
             let mut s = self.settings.clone();
             s.github_auto = auto;

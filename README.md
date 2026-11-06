@@ -109,10 +109,11 @@ Off by default. Switch it on under **⚙ Settings → GitHub (optional)**:
    app): *Repository access* → only your project repository, *Permissions* →
    **Contents: Read and write**.
 2. Enter the **repository** (`owner/name` or its github.com address) and the
-   **token**. *Branch* (default: the repository's default branch) and *Folder*
-   (default: `ais-chat`, `/` = top level) are optional.
+   **token**. *Branch* (default: the repository's default branch, usually
+   `main`) and *Folder* (default: empty = the top level of the repository) are
+   optional.
 3. Choose **when**: only when you click **⬆ GitHub** on a code block, or
-   **automatically** after every answer that contains code.
+   **automatically** for every file an answer contains.
 4. **Save & check access** tells you whether the token can write to the repository.
 
 **Asking about your repository.** The bot cannot open links or GitHub by itself,
@@ -123,11 +124,16 @@ files only, up to 200 KB each and 300 KB together; generated folders such as
 `node_modules` are left out). When your message mentions "GitHub" or "repo"
 and nothing is attached yet, the app offers this right above the message box.
 
-**Saving code.** Each chat gets its own folder (`ais-chat/<chat name>/`), and every push is one
-commit. File names come from the answer when the bot names the file (in a
-first-line comment like `# main.py`, or in the sentence before the code block);
-otherwise the blocks are saved as `code-1.py`, `code-2.js`, … . Saving again
-overwrites the file with the newer version (the old one stays in the history).
+**Saving code.** Code goes straight into your repository at the path the answer
+gives it: when the bot writes "The file `src/main.rs` …" (or starts the code with a
+comment like `// src/main.rs`), that block **replaces `src/main.rs`** on the
+branch. All files of one answer become one commit ("Update Cargo.toml,
+src/main.rs"). Automatic mode only saves blocks that name a file, so command
+snippets like `cargo run` are not committed; a block without a file name is saved
+as `code-1.py`, `code-2.js`, … when you click **⬆ GitHub** on it.
+
+Careful: if the bot shows only *part* of a file, saving it replaces the whole file
+with that part. GitHub keeps every earlier version in the history.
 The button turns into **✔ On GitHub** (click it to open the commit) or shows
 what went wrong. Empty repositories and branches that do not exist yet work too.
 
