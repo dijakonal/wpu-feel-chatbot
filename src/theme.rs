@@ -146,7 +146,9 @@ fn style(s: &mut egui::Style, dark: bool) {
     w.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text);
     w.noninteractive.rounding = r;
 
-    w.inactive.bg_fill = p.surface_hi;
+    // `bg_fill` is what checkboxes and radio buttons are drawn with (buttons use `weak_bg_fill`),
+    // so it needs enough contrast to be seen on cards
+    w.inactive.bg_fill = p.border;
     w.inactive.weak_bg_fill = p.surface_hi;
     w.inactive.bg_stroke = Stroke::NONE;
     w.inactive.fg_stroke = Stroke::new(1.0_f32, p.text);

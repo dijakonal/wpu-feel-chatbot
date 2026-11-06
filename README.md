@@ -88,7 +88,7 @@ message that is only files.
 Uploaded files are listed again with every message of the chat, because the
 history is re-sent every time as well. They belong to their chat: a new chat starts without them.
 
-## Saving code to GitHub (optional)
+## GitHub: reading your repository and saving code (optional)
 
 Off by default. Switch it on under **⚙ Settings → GitHub (optional)**:
 
@@ -103,7 +103,15 @@ Off by default. Switch it on under **⚙ Settings → GitHub (optional)**:
    **automatically** after every answer that contains code.
 4. **Save & check access** tells you whether the token can write to the repository.
 
-Each chat gets its own folder (`ais-chat/<chat name>/`), and every push is one
+**Asking about your repository.** The bot cannot open links or GitHub by itself,
+so the app fetches the files for it: click **+** in the message box →
+**From GitHub**, tick the files (or **Select all code**) and **Attach**. The files
+are added to your message like code files from your computer (text and code
+files only, up to 200 KB each and 300 KB together; generated folders such as
+`node_modules` are left out). When your message mentions "GitHub" or "repo"
+and nothing is attached yet, the app offers this right above the message box.
+
+**Saving code.** Each chat gets its own folder (`ais-chat/<chat name>/`), and every push is one
 commit. File names come from the answer when the bot names the file (in a
 first-line comment like `# main.py`, or in the sentence before the code block);
 otherwise the blocks are saved as `code-1.py`, `code-2.js`, … . Saving again

@@ -1,4 +1,5 @@
-//! Optional: save code from answers to a GitHub repository.
+//! Optional: let the bot read a GitHub repository (files are fetched by the app and attached
+//! to the message) and save code from answers to it.
 //!
 //! Uses the GitHub REST API with a personal access token (a fine-grained token with
 //! "Contents: Read and write" for one repository is enough). All files of one push become one
@@ -223,6 +224,65 @@ pub fn base64(data: &[u8]) -> String {
         out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
     }
     out
+}
+
+// ------------------------------------------------------------------ reading the repository
+
+/// A file in the repository.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RepoFile {
+    pub path: String,
+    pub size: usize,
+}
+
+/// Folders that hold generated or third-party files, not the student's own code.
+const SKIPPED_DIRS: &[&str] =
+    &[".git", "node_modules", "target", "venv", ".venv", "env", "__pycache__", "dist", "build", ".idea", ".vscode", ".next", "vendor"];
+
+/// All files of the branch (the configured one, else the default branch), without generated
+/// folders. Returns `(branch, files, list was cut short by GitHub)`.
+pub fn list_files(cfg: &Config) -> Result<(String, Vec<RepoFile>, bool)> {
+    let api = Api::new(cfg)?;
+    let (default_branch, _) = api.repo_info()?;
+    let branch = if cfg.branch.trim().is_empty() { default_branch } else { cfg.branch.trim().to_string() };
+    let (status, v) = api.get(&format!("/git/trees/{branch}?recursive=1"))?;
+    match status {
+        200 => {}
+        404 => bail!("Branch {branch} not found in {}.", api.repo),
+        409 => bail!("The repository {} is still empty.", api.repo),
+        _ => bail!("Could not list the files (HTTP {status}: {}).", message(&v)),
+    }
+    let mut files: Vec<RepoFile> = v["tree"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter(|i| i["type"] == "blob")
+                .filter_map(|i| Some(RepoFile { path: i["path"].as_str()?.to_string(), size: i["size"].as_u64().unwrap_or(0) as usize }))
+                .filter(|f| !f.path.split('/').any(|part| SKIPPED_DIRS.contains(&part)))
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+    Ok((branch, files, v["truncated"].as_bool().unwrap_or(false)))
+}
+
+/// The text of one file.
+pub fn read_file(cfg: &Config, branch: &str, path: &str) -> Result<String> {
+    let api = Api::new(cfg)?;
+    let encoded: Vec<String> = path.split('/').map(|p| url::form_urlencoded::byte_serialize(p.as_bytes()).collect()).collect();
+    let branch_q: String = url::form_urlencoded::byte_serialize(branch.as_bytes()).collect();
+    let resp = api
+        .req(reqwest::Method::GET, &format!("/contents/{}?ref={branch_q}", encoded.join("/")))
+        .header("Accept", "application/vnd.github.raw")
+        .send()
+        .map_err(|e| if e.is_connect() || e.is_timeout() { anyhow!("Could not reach GitHub.") } else { anyhow!(e) })?;
+    let status = resp.status().as_u16();
+    let bytes = resp.bytes().map_err(|e| anyhow!(e))?.to_vec();
+    if status != 200 {
+        bail!("Could not read {path} (HTTP {status}).");
+    }
+    String::from_utf8(bytes).map_err(|_| anyhow!("{path} is not a text file."))
 }
 
 // ------------------------------------------------------------------ file names
@@ -515,6 +575,42 @@ mod tests {
         assert!(check(&cfg(&api, "")).unwrap_err().to_string().contains("token"));
         let (api, _rx) = mock(vec![]);
         assert!(check(&cfg(&api, "")).unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn lists_and_reads_files() {
+        let (api, rx) = mock(vec![
+            ("GET", "/repos/o/r", 200, r#"{"default_branch":"main","permissions":{"push":true}}"#),
+            (
+                "GET",
+                "/repos/o/r/git/trees/main?recursive=1",
+                200,
+                r#"{"truncated":false,"tree":[
+                    {"path":"src","type":"tree"},
+                    {"path":"src/spiel.py","type":"blob","size":120},
+                    {"path":"README.md","type":"blob","size":40},
+                    {"path":"node_modules/x/index.js","type":"blob","size":9},
+                    {"path":"Bild.png","type":"blob","size":5000}]}"#,
+            ),
+            ("GET", "/repos/o/r/contents/src/spiel.py?ref=main", 200, "print('hallo')\n"),
+        ]);
+        let (branch, files, truncated) = list_files(&cfg(&api, "")).unwrap();
+        assert_eq!(branch, "main");
+        assert!(!truncated);
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["Bild.png", "README.md", "src/spiel.py"], "folders and node_modules are left out");
+        assert_eq!(read_file(&cfg(&api, ""), "main", "src/spiel.py").unwrap(), "print('hallo')\n");
+        let log: Vec<(String, String, String)> = rx.try_iter().collect();
+        assert!(log.iter().any(|l| l.1 == "/repos/o/r/contents/src/spiel.py?ref=main"));
+    }
+
+    #[test]
+    fn explains_empty_repository() {
+        let (api, _rx) = mock(vec![
+            ("GET", "/repos/o/r", 200, r#"{"default_branch":"main","permissions":{"push":true}}"#),
+            ("GET", "/repos/o/r/git/trees/main?recursive=1", 409, r#"{"message":"Git Repository is empty."}"#),
+        ]);
+        assert!(list_files(&cfg(&api, "")).unwrap_err().to_string().contains("empty"));
     }
 
     #[test]

@@ -20,6 +20,9 @@ use crate::settings::{Settings, DEFAULT_INVITE_LINK};
 /// Text files up to this size are pasted into the message instead of being uploaded.
 const INLINE_LIMIT: usize = 200 * 1024;
 
+/// At most this much text from a GitHub repository goes into one message.
+const REPO_BUDGET: usize = 300 * 1024;
+
 const FALLBACK_GREETING: &str = "Hello! How can I help you?";
 
 enum Msg {
@@ -31,6 +34,10 @@ enum Msg {
     Pushed { keys: Vec<String>, result: Result<String, String> },
     /// "Check access" in Settings finished.
     GithubChecked(Result<String, String>),
+    /// The file list of the GitHub repository: `(branch, files, list cut short)`.
+    RepoListed(Result<(String, Vec<github::RepoFile>, bool), String>),
+    /// One file from the repository was read for an attachment.
+    RepoFileLoaded { conv: String, id: u64, result: Result<String, String> },
     /// The bot translated its greeting (`None`: it did not work).
     GreetingTranslated { lang: String, source: String, text: Option<String> },
     // `conv` = id of the chat the work belongs to (it may no longer be the open one)
@@ -79,6 +86,8 @@ pub struct App {
     github_checking: bool,
     /// Language whose greeting translation is being fetched.
     translating: Option<String>,
+    /// The "Attach from GitHub" dialog, while open.
+    repo_picker: Option<RepoPicker>,
     /// GitHub state of code blocks, by `<message id>#<n>`.
     push_states: std::collections::HashMap<String, PushState>,
 
@@ -116,6 +125,7 @@ impl App {
             github_note: None,
             github_checking: false,
             translating: None,
+            repo_picker: None,
             push_states: Default::default(),
             tx,
             rx,
@@ -415,6 +425,28 @@ impl App {
                     };
                     for k in keys {
                         self.push_states.insert(k, state.clone());
+                    }
+                }
+                Msg::RepoListed(result) => {
+                    if let Some(picker) = &mut self.repo_picker {
+                        picker.loading = false;
+                        match result {
+                            Ok((branch, files, truncated)) => {
+                                picker.branch = branch;
+                                picker.files = files;
+                                picker.truncated = truncated;
+                            }
+                            Err(e) => picker.error = Some(e),
+                        }
+                    }
+                }
+                Msg::RepoFileLoaded { conv, id, result } => {
+                    let Some(c) = self.convs.iter_mut().find(|c| c.id == conv) else { continue };
+                    if let Some(f) = c.pending.iter_mut().find(|f| f.id == id) {
+                        f.state = match result {
+                            Ok(text) => FileState::Ready(AttachmentData::Inline(text)),
+                            Err(e) => FileState::Failed(e),
+                        };
                     }
                 }
                 Msg::GreetingTranslated { lang, source, text } => {
@@ -730,6 +762,192 @@ impl App {
         self.save_chats();
     }
 
+    fn open_repo_picker(&mut self) {
+        self.repo_picker = Some(RepoPicker {
+            loading: true,
+            error: None,
+            branch: String::new(),
+            files: Vec::new(),
+            selected: Default::default(),
+            filter: String::new(),
+            truncated: false,
+        });
+        let cfg = self.settings.github_config();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::RepoListed(github::list_files(&cfg).map_err(|e| e.to_string())));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Attach the files chosen in the dialog to the open chat's next message (read in the
+    /// background; they show as "loading" until then).
+    fn attach_repo_files(&mut self) {
+        let Some(picker) = self.repo_picker.take() else { return };
+        let mut jobs = Vec::new();
+        for f in picker.files.iter().filter(|f| picker.selected.contains(&f.path)) {
+            let id = self.next_file_id;
+            self.next_file_id += 1;
+            self.pending.push(PendingFile { id, name: f.path.clone(), size: f.size, state: FileState::Uploading });
+            jobs.push((id, f.path.clone()));
+        }
+        let cfg = self.settings.github_config();
+        let branch = picker.branch.clone();
+        let conv = self.id.clone();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            for (id, path) in jobs {
+                let result = github::read_file(&cfg, &branch, &path).map_err(|e| e.to_string());
+                let _ = tx.send(Msg::RepoFileLoaded { conv: conv.clone(), id, result });
+                ctx.request_repaint();
+            }
+        });
+        self.focus_input = true;
+    }
+
+    /// The "Attach from GitHub" dialog.
+    fn repo_picker_window(&mut self, ctx: &egui::Context) {
+        let Some(picker) = &mut self.repo_picker else { return };
+        let p = theme::palette(ctx.style().visuals.dark_mode);
+        let repo = github::normalize_repo(&self.settings.github_repo).unwrap_or_default();
+        let (mut close, mut attach) = (false, false);
+
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("repo-dim")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
+            let r = ui.allocate_rect(screen, egui::Sense::click());
+            ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(110));
+            if r.clicked() {
+                close = true;
+            }
+        });
+
+        egui::Window::new("Attach from GitHub")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .order(egui::Order::Foreground)
+            .default_width(560.0)
+            .min_width(560.0)
+            .max_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(RichText::new("Attach from GitHub").family(theme::bold()).size(20.0).color(p.text));
+                        let branch = if picker.branch.is_empty() { String::new() } else { format!(" · {}", picker.branch) };
+                        ui.label(RichText::new(format!("{repo}{branch}")).small().color(p.weak));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        if theme::ghost_button(ui, "✖").on_hover_text("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+
+                if picker.loading {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(16.0));
+                        ui.label(RichText::new("Reading the file list…").color(p.weak));
+                    });
+                    return;
+                }
+                if let Some(e) = &picker.error {
+                    ui.add(egui::Label::new(RichText::new(format!("⚠ {e}")).color(p.danger)).wrap());
+                    return;
+                }
+                ui.label(
+                    RichText::new("The app reads the chosen files and attaches them to your message, so the bot can see the code.")
+                        .small()
+                        .color(p.weak),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut picker.filter).hint_text("🔍 Filter, e.g. .py or src/").desired_width(300.0));
+                    if theme::secondary_button(ui, "Select all code").on_hover_text("All text and code files that fit").clicked() {
+                        let filter = picker.filter.to_lowercase();
+                        let mut total = picker.selected_size();
+                        for f in &picker.files {
+                            if picker.selected.contains(&f.path) || not_attachable(f).is_some() || !f.path.to_lowercase().contains(&filter) {
+                                continue;
+                            }
+                            if total + f.size <= REPO_BUDGET {
+                                total += f.size;
+                                picker.selected.insert(f.path.clone());
+                            }
+                        }
+                    }
+                    if theme::ghost_button(ui, "Clear").clicked() {
+                        picker.selected.clear();
+                    }
+                });
+                ui.add_space(4.0);
+
+                let filter = picker.filter.to_lowercase();
+                egui::Frame::none().fill(p.surface).stroke(Stroke::new(1.0_f32, p.border)).rounding(10.0).inner_margin(6.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height((screen.height() - 330.0).clamp(140.0, 380.0)).auto_shrink([false, true]).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let mut shown = 0;
+                        for f in picker.files.iter().filter(|f| f.path.to_lowercase().contains(&filter)) {
+                            shown += 1;
+                            let mut on = picker.selected.contains(&f.path);
+                            let reason = not_attachable(f);
+                            ui.horizontal(|ui| {
+                                let r = ui.add_enabled(reason.is_none(), egui::Checkbox::new(&mut on, &f.path));
+                                if let Some(why) = reason {
+                                    r.on_disabled_hover_text(why);
+                                }
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(RichText::new(human_size(f.size)).small().color(p.weak));
+                                });
+                            });
+                            if on {
+                                picker.selected.insert(f.path.clone());
+                            } else {
+                                picker.selected.remove(&f.path);
+                            }
+                        }
+                        if shown == 0 {
+                            let text = if picker.files.is_empty() { "The repository has no files yet." } else { "No file matches the filter." };
+                            ui.label(RichText::new(text).color(p.weak));
+                        }
+                    });
+                });
+                if picker.truncated {
+                    ui.label(RichText::new("The repository is very large – GitHub listed only part of it.").small().color(p.warning));
+                }
+
+                ui.add_space(6.0);
+                let total = picker.selected_size();
+                let too_big = total > REPO_BUDGET;
+                ui.horizontal(|ui| {
+                    let n = picker.selected.len();
+                    let summary = format!("{n} file{} · {} of {}", if n == 1 { "" } else { "s" }, human_size(total), human_size(REPO_BUDGET));
+                    ui.label(RichText::new(summary).small().color(if too_big { p.danger } else { p.weak }));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let label = if n == 0 { "Attach".to_string() } else { format!("Attach {n}") };
+                        let b = theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(n > 0 && !too_big);
+                        if ui.add(b).on_disabled_hover_text("Choose files (at most 300 KB in total)").clicked() {
+                            attach = true;
+                        }
+                        if theme::secondary_button(ui, "Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+
+        if attach {
+            self.attach_repo_files();
+        } else if close || ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.repo_picker = None;
+            self.focus_input = true;
+        }
+    }
+
     fn check_github(&mut self) {
         self.github_checking = true;
         self.github_note = None;
@@ -749,7 +967,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.label(RichText::new("GitHub (optional)").family(theme::bold()).color(p.text));
-                ui.label(RichText::new("Save code from answers to your own repository.").small().color(p.weak));
+                ui.label(RichText::new("Let the bot read your repository and save code to it.").small().color(p.weak));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let tip = if enabled { "Switch GitHub off" } else { "Switch GitHub on" };
@@ -921,6 +1139,27 @@ impl App {
                     ui.add_space(2.0);
                 }
 
+                // the bot cannot open GitHub itself: offer the repository's files instead
+                let mentions_repo = {
+                    let t = self.input.to_lowercase();
+                    t.contains("github") || t.contains("repo")
+                };
+                if mentions_repo && self.pending.is_empty() && self.settings.github_ready() && self.repo_picker.is_none() {
+                    let repo = github::normalize_repo(&self.settings.github_repo).unwrap_or_default();
+                    let mut open = false;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("💡 The bot cannot open GitHub by itself –").small().color(p.weak));
+                        let b = theme::Btn::new(theme::Kind::Secondary, RichText::new(format!("attach files from {repo}")).small())
+                            .min_size(egui::vec2(0.0, 26.0))
+                            .rounding(999.0);
+                        open = ui.add(b).clicked();
+                    });
+                    if open {
+                        self.open_repo_picker();
+                    }
+                }
+
                 // attachments waiting for the next message
                 if !self.pending.is_empty() {
                     let mut remove = None;
@@ -957,10 +1196,38 @@ impl App {
                 }
 
                 ui.with_layout(Layout::left_to_right(Align::Max), |ui| {
-                    if theme::round_button(ui, theme::RoundIcon::Attach, true, 36.0)
-                        .on_hover_text("Attach files (or drag them onto the window)")
-                        .clicked()
-                    {
+                    let attach = theme::round_button(ui, theme::RoundIcon::Attach, true, 36.0);
+                    if self.settings.github_ready() {
+                        // two sources: this computer or the GitHub repository
+                        let menu = ui.make_persistent_id("attach-menu");
+                        let attach = attach.on_hover_text("Attach files from this computer or from GitHub");
+                        if attach.clicked() {
+                            ui.memory_mut(|m| m.toggle_popup(menu));
+                        }
+                        let repo = github::normalize_repo(&self.settings.github_repo).unwrap_or_default();
+                        let (mut local, mut remote) = (false, false);
+                        egui::popup::popup_above_or_below_widget(
+                            ui,
+                            menu,
+                            &attach,
+                            egui::AboveOrBelow::Above,
+                            egui::PopupCloseBehavior::CloseOnClick,
+                            |ui| {
+                                ui.set_min_width(300.0);
+                                let item = |text: String| {
+                                    egui::Button::new(text).wrap_mode(egui::TextWrapMode::Extend).min_size(egui::vec2(300.0, 34.0))
+                                };
+                                local = ui.add(item("📄  Files from this computer".into())).clicked();
+                                remote = ui.add(item(format!("⬇  From GitHub · {repo}"))).clicked();
+                            },
+                        );
+                        if local {
+                            self.pick_files();
+                        }
+                        if remote {
+                            self.open_repo_picker();
+                        }
+                    } else if attach.on_hover_text("Attach files (or drag them onto the window)").clicked() {
                         self.pick_files();
                     }
                     let edit = egui::TextEdit::multiline(&mut self.input)
@@ -1377,6 +1644,34 @@ impl App {
     }
 }
 
+/// State of the "Attach from GitHub" dialog.
+struct RepoPicker {
+    loading: bool,
+    error: Option<String>,
+    branch: String,
+    files: Vec<github::RepoFile>,
+    selected: std::collections::BTreeSet<String>,
+    filter: String,
+    truncated: bool,
+}
+
+impl RepoPicker {
+    fn selected_size(&self) -> usize {
+        self.files.iter().filter(|f| self.selected.contains(&f.path)).map(|f| f.size).sum()
+    }
+}
+
+/// Why a repository file cannot be attached (`None` = it can).
+fn not_attachable(f: &github::RepoFile) -> Option<&'static str> {
+    if !ais::is_text_name(&f.path) {
+        Some("Only text and code files can be read by the bot this way.")
+    } else if f.size > INLINE_LIMIT {
+        Some("Larger than 200 KB.")
+    } else {
+        None
+    }
+}
+
 enum RowAction {
     None,
     Open(String),
@@ -1745,6 +2040,7 @@ impl eframe::App for App {
         self.bottom_bar(ctx);
         self.chat(ctx);
         self.settings_window(ctx);
+        self.repo_picker_window(ctx);
         self.reply_to_selection(ctx);
 
         if self.busy || self.pending.iter().any(|f| matches!(f.state, FileState::Uploading)) {
