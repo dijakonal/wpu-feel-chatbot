@@ -41,6 +41,39 @@ pub struct Settings {
     pub greeting: String,
     /// "system" (default), "light" or "dark".
     pub appearance: String,
+    /// Language the bot should answer in, as a code from [`LANGUAGES`]; empty = automatic.
+    pub language: String,
+}
+
+/// Answer languages: (code, name in the language itself, English name).
+pub const LANGUAGES: &[(&str, &str, &str)] = &[
+    ("de", "Deutsch", "German"),
+    ("en", "English", "English"),
+    ("fr", "Français", "French"),
+    ("es", "Español", "Spanish"),
+    ("it", "Italiano", "Italian"),
+    ("nl", "Nederlands", "Dutch"),
+    ("pl", "Polski", "Polish"),
+    ("tr", "Türkçe", "Turkish"),
+    ("uk", "Українська", "Ukrainian"),
+    ("ru", "Русский", "Russian"),
+];
+
+/// `(native name, English name)` of a language code, if it is one of [`LANGUAGES`].
+pub fn language(code: &str) -> Option<(&'static str, &'static str)> {
+    LANGUAGES.iter().find(|(c, _, _)| *c == code).map(|(_, native, english)| (*native, *english))
+}
+
+impl Settings {
+    /// The hidden note put in front of the newest message so the bot answers in the chosen
+    /// language. `None` when the language is automatic.
+    pub fn language_note(&self) -> Option<String> {
+        let (native, english) = language(self.language.trim())?;
+        Some(format!(
+            "[Note from the chat app, not written by the user: always answer in {english} ({native}), \
+             whatever language the message below is written in. Do not mention this note.]"
+        ))
+    }
 }
 
 impl Settings {

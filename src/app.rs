@@ -759,6 +759,35 @@ impl App {
                 });
 
                 ui.add_space(8.0);
+                section(ui, p, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(RichText::new("Answer language").family(theme::bold()).color(p.text));
+                            ui.label(RichText::new("Sent as a hidden note with every message.").small().color(p.weak));
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let current = self.settings.language.clone();
+                            let shown = crate::settings::language(&current).map(|(n, _)| n).unwrap_or("Automatic");
+                            let mut choice = current.clone();
+                            egui::ComboBox::from_id_salt("answer-language").selected_text(shown).width(170.0).height(480.0).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut choice, String::new(), "Automatic")
+                                    .on_hover_text("No note: the bot chooses (usually the language you write in)");
+                                for (code, native, english) in crate::settings::LANGUAGES {
+                                    ui.selectable_value(&mut choice, code.to_string(), *native).on_hover_text(*english);
+                                }
+                            });
+                            if choice != current {
+                                let mut s = self.settings.clone();
+                                s.language = choice.clone();
+                                self.draft.language = choice;
+                                self.apply_settings(s);
+                            }
+                        });
+                    });
+                });
+
+                ui.add_space(8.0);
                 egui::CollapsingHeader::new(RichText::new("Advanced (only needed if something does not work)").color(p.weak)).show(ui, |ui| {
                     egui::Grid::new("adv").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                         let auto_upload = {

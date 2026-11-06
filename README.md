@@ -22,7 +22,12 @@ box sends. AIS.chat "can make mistakes" – check what it tells you.
    **↩ Reply** button that appears next to it. The quote shows above the message
    box (✖ or Esc removes it) and above your message in the chat; the bot gets it
    as a Markdown quote (`> …`) in front of your question.
-5. **➕ New chat** starts over; the round **■** button stops a long answer;
+5. **⚙ Settings → Answer language** makes the bot always answer in one language
+   (Deutsch, English, Français, Español, …), whatever language you write in.
+   The app puts a short note in front of your newest message in the request –
+   it is not shown in the window and not kept in the chat history, so a change
+   applies from the next message on. *Automatic* sends no note.
+6. **➕ New chat** starts over; the round **■** button stops a long answer;
    **Copy** under an answer and on code blocks puts text on the clipboard.
 
 There is nothing to set up. To use a *different* shared character, open

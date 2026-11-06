@@ -143,9 +143,14 @@ fn esc(s: &str) -> String {
 }
 
 pub fn build_body(s: &Settings, msgs: &[ChatMessage], session_id: &str) -> String {
+    // The language note travels only with the newest user message and is never stored in the
+    // chat, so changing the language takes effect with the next message.
+    let last_user = msgs.iter().rposition(|m| m.role == Role::User);
+    let note = s.language_note();
     let messages: Vec<Value> = msgs
         .iter()
-        .map(|m| match (m.role, m.initial) {
+        .enumerate()
+        .map(|(i, m)| match (m.role, m.initial) {
             (Role::Assistant, true) => json!({
                 "id": "initial-message",
                 "role": "assistant",
@@ -155,7 +160,10 @@ pub fn build_body(s: &Settings, msgs: &[ChatMessage], session_id: &str) -> Strin
             (Role::User, _) => json!({
                 "id": m.id,
                 "role": "user",
-                "content": esc(&m.content),
+                "content": esc(&match (&note, Some(i) == last_user) {
+                    (Some(n), true) => format!("{n}\n\n{}", m.content),
+                    _ => m.content.clone(),
+                }),
                 "createdAt": format!("$D{}", m.created_at),
             }),
             (Role::Assistant, false) => json!({
@@ -254,6 +262,9 @@ pub fn stream_reply(s: &Settings, body: String, mut on_event: impl FnMut(&Event)
         .header("next-router-state-tree", router_state_tree(s.character_id.trim()))
         .header("Origin", s.base())
         .header("Referer", &url);
+    if crate::settings::language(s.language.trim()).is_some() {
+        req = req.header("Accept-Language", s.language.trim());
+    }
     if !s.deployment_id.trim().is_empty() {
         req = req.header("x-deployment-id", s.deployment_id.trim());
     }
@@ -842,6 +853,28 @@ mod tests {
     }
 
     #[test]
+    fn language_note_goes_only_in_front_of_the_newest_message() {
+        let mut s = Settings { character_id: "cid".into(), invite_code: "code".into(), ..Default::default() };
+        let msgs = vec![
+            ChatMessage::greeting("Hallo"),
+            ChatMessage::user("first"),
+            ChatMessage::assistant_placeholder(),
+            ChatMessage::user("$second"),
+        ];
+        let v: Value = serde_json::from_str(&build_body(&s, &msgs, "sess")).unwrap();
+        assert_eq!(v[0]["messages"][3]["content"], "$$second", "automatic: unchanged");
+
+        s.language = "en".into();
+        let v: Value = serde_json::from_str(&build_body(&s, &msgs, "sess")).unwrap();
+        assert_eq!(v[0]["messages"][1]["content"], "first");
+        let last = v[0]["messages"][3]["content"].as_str().unwrap();
+        assert!(last.starts_with("[Note from the chat app"), "{last}");
+        assert!(last.contains("English (English)"));
+        assert!(last.ends_with("\n\n$second"));
+        assert_eq!(msgs[3].content, "$second", "the stored chat stays clean");
+    }
+
+    #[test]
     fn inline_file_is_pasted_and_hidden_in_display() {
         let a = Attachment { name: "main.py".into(), size: 9, data: AttachmentData::Inline("print(1)\n".into()) };
         let m = ChatMessage::user_with("Why?", vec![a]);
@@ -977,6 +1010,28 @@ mod tests {
         println!("reply: {text:?} activity: {activity:?}");
         assert!(text.to_lowercase().contains("pineapple"));
         assert!(!text.contains("ai_activity"));
+    }
+
+    /// `cargo test -- --ignored live_` : the bot follows the language note.
+    #[test]
+    #[ignore]
+    fn live_language_note() {
+        let mut s = Settings::default();
+        s.apply_invite_link(crate::settings::DEFAULT_INVITE_LINK).unwrap();
+        refresh(&mut s).expect("setup");
+        s.language = "fr".into();
+        let msgs = vec![ChatMessage::greeting(&s.greeting), ChatMessage::user("Was ist eine Variable? Antworte in einem Satz.")];
+        let mut text = String::new();
+        stream_reply(&s, build_body(&s, &msgs, &new_session_id()), |ev| {
+            if let Event::Text(t) = ev {
+                text.push_str(t)
+            }
+        })
+        .expect("reply");
+        println!("reply: {text}");
+        let l = text.to_lowercase();
+        assert!(l.contains(" une ") || l.contains(" est ") || l.contains(" des "), "not French: {text}");
+        assert!(!l.contains("note"), "mentions the note: {text}");
     }
 
     #[test]
