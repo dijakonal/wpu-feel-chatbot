@@ -242,3 +242,12 @@ default:
 ```bash
 cargo test -- --ignored live_
 ```
+
+
+## What Im working on right now
+- Adding support for different models and chatbot api's
+- Improving ui
+- Adding a cli tool for both linux and windows
+- Adding the ability to modify local files
+
+If anyone wants to help me further develop this tool (especially if theyre in the same course that Im in) please reach out to me Id love to colab with other people on this
