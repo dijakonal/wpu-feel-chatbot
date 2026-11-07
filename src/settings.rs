@@ -65,6 +65,15 @@ pub struct Settings {
     /// Empty = https://api.github.com (GitHub Enterprise: https://host/api/v3).
     pub github_api: String,
 
+    /// Which model answers: empty = the AIS.chat class bot, otherwise a GitHub Models id such as
+    /// `openai/gpt-4.1-mini` (free with a GitHub token that has "Models: Read").
+    pub model: String,
+    /// Empty = https://models.github.ai (other values only for tests).
+    pub models_api: String,
+    /// The class bot's instructions from its AIS.chat page – given to GitHub models so they
+    /// behave like the class bot.
+    pub character_instructions: String,
+
     /// Greetings the bot translated (for bots whose greeting the app does not know):
     /// language code → [original greeting, translation].
     pub greeting_translations: std::collections::BTreeMap<String, [String; 2]>,
@@ -102,6 +111,11 @@ impl Settings {
     /// GitHub is switched on and has a repository and a token.
     pub fn github_ready(&self) -> bool {
         self.github_enabled && crate::github::normalize_repo(&self.github_repo).is_some() && !self.github_token.trim().is_empty()
+    }
+
+    /// A GitHub model answers instead of the AIS.chat class bot.
+    pub fn uses_github_models(&self) -> bool {
+        !self.model.trim().is_empty()
     }
 
     pub fn github_folder(&self) -> String {

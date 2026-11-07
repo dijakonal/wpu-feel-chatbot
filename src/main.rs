@@ -5,11 +5,13 @@
 
 mod ais;
 mod app;
+mod backend;
 mod conversations;
 mod github;
 mod i18n;
 mod markdown;
 mod merge;
+mod models;
 mod secret;
 mod settings;
 mod theme;

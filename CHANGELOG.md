@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Model list** at the top of the window: the class bot (AIS.chat, default) or a
+  free model via GitHub Models (GPT-4.1 mini, Codestral, Llama, …) – for when the
+  class chat is not available. Needs a GitHub token with "Models: Read". The free
+  models get the class bot's instructions, and a chat can switch models at any time.
+
 ## 1.0.1 – 2026-11-06
 
 **New downloads for Linux**

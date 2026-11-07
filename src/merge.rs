@@ -6,7 +6,6 @@
 
 use anyhow::{anyhow, bail, Result};
 
-use crate::ais::{self, ChatMessage, Event};
 use crate::settings::Settings;
 
 /// Files larger than this are not merged (the request would get too big); saving them fails
@@ -65,16 +64,7 @@ pub fn placement_from_reply(reply: &str) -> Option<String> {
 /// Ask the bot where a code block without a file name belongs: an existing file of the
 /// repository (it will be merged into it) or a new path.
 pub fn place(s: &Settings, repo_files: &[String], lang: &str, before: &str, code: &str) -> Result<String> {
-    let mut plain = s.clone();
-    plain.language.clear();
-    plain.github_enabled = false;
-    let msgs = vec![ChatMessage::user(&placement_request(repo_files, lang, before, code))];
-    let mut reply = String::new();
-    ais::stream_reply(&plain, ais::build_body(&plain, &msgs, &ais::new_session_id()), |ev| {
-        if let Event::Text(t) = ev {
-            reply.push_str(t);
-        }
-    })?;
+    let reply = crate::backend::ask(s, &placement_request(repo_files, lang, before, code))?;
     placement_from_reply(&reply).ok_or_else(|| anyhow!("the bot did not name a usable file"))
 }
 
@@ -104,23 +94,14 @@ pub fn merge(s: &Settings, path: &str, current: &str, new_code: &str) -> Result<
         bail!("{path} is too large to merge automatically ({} KB)", current.len() / 1024);
     }
     // a plain request: no answer-language or GitHub note (they could change the code)
-    let mut plain = s.clone();
-    plain.language.clear();
-    plain.github_enabled = false;
-    let msgs = vec![ChatMessage::user(&merge_request(path, current, new_code))];
-    let mut reply = String::new();
-    ais::stream_reply(&plain, ais::build_body(&plain, &msgs, &ais::new_session_id()), |ev| {
-        if let Event::Text(t) = ev {
-            reply.push_str(t);
-        }
-    })
-    .map_err(|e| anyhow!("merging {path} failed: {e}"))?;
+    let reply = crate::backend::ask(s, &merge_request(path, current, new_code)).map_err(|e| anyhow!("merging {path} failed: {e}"))?;
     merged_file(&reply).map_err(|e| anyhow!("merging {path} failed: {e}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ais::{self, ChatMessage, Event};
 
     #[test]
     fn request_fences_cannot_be_broken() {

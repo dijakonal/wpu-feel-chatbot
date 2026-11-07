@@ -626,6 +626,7 @@ pub struct Detected {
     pub actions: Vec<(String, Option<String>)>,
     pub character_name: Option<String>,
     pub greeting: Option<String>,
+    pub instructions: Option<String>,
 }
 
 /// The page's `<meta name="baggage">` carries `sentry-release=<id>`, which equals the deployment id.
@@ -644,6 +645,7 @@ pub fn detect(s: &Settings) -> Result<Detected> {
     let deployment_id = deployment_from_html(&html);
     let character_name = character_name_from_html(&html);
     let greeting = page_string_field(&html, "initialMessage");
+    let instructions = page_string_field(&html, "instructions");
 
     let mut actions: Vec<(String, Option<String>)> = Vec::new();
     for url in chunk_urls(&html, &s.base()).into_iter().take(60) {
@@ -655,7 +657,7 @@ pub fn detect(s: &Settings) -> Result<Detected> {
             }
         }
     }
-    Ok(Detected { deployment_id, actions, character_name, greeting })
+    Ok(Detected { deployment_id, actions, character_name, greeting, instructions })
 }
 
 /// Read everything needed from the site and store it in `s`. Returns a short summary for the
@@ -683,6 +685,9 @@ pub fn refresh(s: &mut Settings) -> Result<String> {
     }
     if let Some(g) = d.greeting {
         s.greeting = g;
+    }
+    if let Some(i) = d.instructions {
+        s.character_instructions = i;
     }
     Ok(format!("Connected to {}.", s.display_name()))
 }

@@ -38,6 +38,8 @@ enum Msg {
     RepoListed(Result<(String, Vec<github::RepoFile>, bool), String>),
     /// One file from the repository was read for an attachment.
     RepoFileLoaded { conv: String, id: u64, result: Result<String, String> },
+    /// The GitHub Models catalog was read.
+    ModelsLoaded(Result<Vec<crate::models::Model>, String>),
     /// The bot translated its greeting (`None`: it did not work).
     GreetingTranslated { lang: String, source: String, text: Option<String> },
     // `conv` = id of the chat the work belongs to (it may no longer be the open one)
@@ -88,6 +90,10 @@ pub struct App {
     translating: Option<String>,
     /// The "Attach from GitHub" dialog, while open.
     repo_picker: Option<RepoPicker>,
+    /// Free models for the model list (built-in list until the catalog is read).
+    models: Vec<crate::models::Model>,
+    models_loading: bool,
+    models_note: Option<(bool, String)>,
     /// GitHub state of code blocks, by `<message id>#<n>`.
     push_states: std::collections::HashMap<String, PushState>,
 
@@ -126,6 +132,9 @@ impl App {
             github_checking: false,
             translating: None,
             repo_picker: None,
+            models: crate::models::fallback_models(),
+            models_loading: false,
+            models_note: None,
             push_states: Default::default(),
             tx,
             rx,
@@ -135,6 +144,7 @@ impl App {
         // always open on a fresh chat; earlier ones are in the sidebar
         app.new_chat();
         app.start_refresh(false);
+        app.load_models();
         install_quote_capture(&cc.egui_ctx);
         app
     }
@@ -172,6 +182,12 @@ impl App {
                 self.pending.push(PendingFile { id, name, size, state: FileState::Ready(AttachmentData::Inline(text)) });
                 return;
             }
+        }
+        // GitHub models only read text: PDFs, images and Office files need the class bot's upload
+        if self.settings.uses_github_models() {
+            let msg = "only text and code files work with GitHub models – switch to the class bot for this file".to_string();
+            self.pending.push(PendingFile { id, name, size, state: FileState::Failed(msg) });
+            return;
         }
         // Everything else goes to the upload address, which is worked out from the invite link.
         self.pending.push(PendingFile { id, name: name.clone(), size, state: FileState::Uploading });
@@ -297,7 +313,8 @@ impl App {
     /// separate session that no chat uses) and keep the answer in the settings.
     fn translate_greeting_if_needed(&mut self) {
         let lang = self.settings.language.trim().to_string();
-        if !self.settings.greeting_needs_translation() || !self.settings.is_ready() || self.translating.as_deref() == Some(lang.as_str()) {
+        let can_ask = self.settings.is_ready() || self.settings.uses_github_models();
+        if !self.settings.greeting_needs_translation() || !can_ask || self.translating.as_deref() == Some(lang.as_str()) {
             return;
         }
         let Some((_, english)) = crate::settings::language(&lang) else { return };
@@ -308,14 +325,7 @@ impl App {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let msgs = vec![ChatMessage::user(&request)];
-            let mut reply = String::new();
-            let ok = ais::stream_reply(&s, ais::build_body(&s, &msgs, &ais::new_session_id()), |ev| {
-                if let Event::Text(t) = ev {
-                    reply.push_str(t);
-                }
-            });
-            let text = ok.ok().and_then(|_| crate::i18n::clean_translation(&reply, &source));
+            let text = crate::backend::ask(&s, &request).ok().and_then(|reply| crate::i18n::clean_translation(&reply, &source));
             let _ = tx.send(Msg::GreetingTranslated { lang, source, text });
             ctx.request_repaint();
         });
@@ -449,6 +459,14 @@ impl App {
                         };
                     }
                 }
+                Msg::ModelsLoaded(result) => {
+                    self.models_loading = false;
+                    match result {
+                        Ok(models) => self.models = models,
+                        // the built-in list stays; sending tells what is wrong if it matters
+                        Err(e) => eprintln!("could not read the GitHub Models catalog: {e}"),
+                    }
+                }
                 Msg::GreetingTranslated { lang, source, text } => {
                     if self.translating.as_deref() == Some(lang.as_str()) {
                         self.translating = None;
@@ -537,8 +555,10 @@ impl App {
                         ui.label(RichText::new(self.settings.display_name()).family(theme::bold()).size(16.0).color(p.text));
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
+                            let github = self.settings.uses_github_models();
                             let (color, text) = match &self.conn {
-                                Conn::Ready if self.busy => (p.success, "typing…".to_string()),
+                                _ if self.busy => (p.success, "typing…".to_string()),
+                                _ if github => (p.success, "via GitHub Models".to_string()),
                                 Conn::Ready => (p.success, "Online".to_string()),
                                 Conn::Connecting => (p.warning, "Connecting…".to_string()),
                                 Conn::Problem(_) => (p.danger, "Offline".to_string()),
@@ -564,6 +584,8 @@ impl App {
                         if new_chat.on_hover_text("Start a new chat (this one stays in the list)").clicked() {
                             self.new_chat();
                         }
+                        ui.add_space(4.0);
+                        self.model_picker(ui, p);
                     });
                 });
             });
@@ -1064,7 +1086,7 @@ impl App {
     }
 
     fn composer(&mut self, ui: &mut egui::Ui, p: theme::Palette) {
-        if let Conn::Problem(e) = &self.conn {
+        if let (Conn::Problem(e), false) = (&self.conn, self.settings.uses_github_models()) {
             let e = e.clone();
             notice(ui, p.danger, |ui| {
                 ui.label(RichText::new(format!("Not connected. {e}")).color(p.text));
@@ -1487,6 +1509,9 @@ impl App {
                     });
 
                     ui.add_space(8.0);
+                    section(ui, p, |ui| self.models_settings(ui, p));
+
+                    ui.add_space(8.0);
                     section(ui, p, |ui| self.github_settings(ui, p));
 
                     ui.add_space(8.0);
@@ -1583,6 +1608,104 @@ impl App {
                 self.start_refresh(true);
             }
             Err(e) => self.settings_note = Some((false, e.to_string())),
+        }
+    }
+
+    /// Which model answers: the AIS.chat class bot, or a free model via GitHub Models.
+    fn model_picker(&mut self, ui: &mut egui::Ui, p: theme::Palette) {
+        let current = self.settings.model.clone();
+        let label = if current.is_empty() {
+            "🎓 Class bot".to_string()
+        } else {
+            let name = self.models.iter().find(|m| m.id == current).map(|m| m.name.clone()).unwrap_or_else(|| current.clone());
+            format!("⚡ {name}")
+        };
+        let mut choice = current.clone();
+        let combo = egui::ComboBox::from_id_salt("model-picker")
+            .selected_text(RichText::new(fit_text(ui, &label, &egui::TextStyle::Button.resolve(ui.style()), 200.0)))
+            .width(220.0)
+            .height(420.0)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(300.0);
+                ui.label(RichText::new("AIS.chat").small().family(theme::bold()).color(p.weak));
+                ui.selectable_value(&mut choice, String::new(), format!("🎓 Class bot · {}", self.settings.display_name()))
+                    .on_hover_text("The shared class chat – also reads PDFs, images and Office files");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Free via GitHub Models").small().family(theme::bold()).color(p.weak));
+                    if self.models_loading {
+                        ui.add(egui::Spinner::new().size(12.0));
+                    }
+                });
+                for m in &self.models {
+                    let tier = match m.tier.as_str() {
+                        "low" => "many requests per day",
+                        "high" => "fewer requests per day",
+                        _ => "daily limit",
+                    };
+                    ui.selectable_value(&mut choice, m.id.clone(), format!("⚡ {}", m.name)).on_hover_text(format!("{} · free, {tier}", m.id));
+                }
+                if self.settings.github_token.trim().is_empty() {
+                    ui.label(RichText::new("Needs a GitHub token – see Settings").small().color(p.warning));
+                }
+            });
+        combo.response.on_hover_text("Which model answers");
+        if choice != current {
+            let mut s = self.settings.clone();
+            s.model = choice.clone();
+            self.draft.model = choice.clone();
+            self.apply_settings(s);
+            if !choice.is_empty() && self.settings.github_token.trim().is_empty() {
+                self.open_settings();
+                self.models_note = Some((false, "Add a GitHub token with the permission \"Models: Read\" to use free models.".into()));
+            }
+        }
+    }
+
+    /// Read the GitHub Models catalog in the background (the built-in list stays until then).
+    fn load_models(&mut self) {
+        if self.models_loading {
+            return;
+        }
+        self.models_loading = true;
+        let api = self.settings.models_api.clone();
+        let token = self.settings.github_token.clone();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::ModelsLoaded(crate::models::fetch_catalog(&api, &token).map_err(|e| e.to_string())));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Settings: the token for free models (the same GitHub token as for saving code).
+    fn models_settings(&mut self, ui: &mut egui::Ui, p: theme::Palette) {
+        ui.label(RichText::new("Free models (GitHub)").family(theme::bold()).color(p.text));
+        ui.label(
+            RichText::new("Pick a free model in the list at the top instead of the class bot. Needs a GitHub token with the permission \"Models: Read\".")
+                .small()
+                .color(p.weak),
+        );
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.github_token).password(true).hint_text("github_pat_…").desired_width(300.0))
+                .on_hover_text("The same token as for saving code to GitHub. Kept in your system's password store.");
+            if theme::primary_button(ui, "Save").clicked() {
+                let mut s = self.settings.clone();
+                s.github_token = self.draft.github_token.trim().to_string();
+                self.apply_settings(s);
+                self.models_note = Some((true, "Saved – the model list is being updated.".into()));
+                self.load_models();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Create a token:").small().color(p.weak));
+            ui.hyperlink_to(RichText::new("github.com → Fine-grained token").small(), "https://github.com/settings/personal-access-tokens/new")
+                .on_hover_text("Account permissions → Models: Read-only (add Contents: Read and write for a repository if you also save code)");
+        });
+        if let Some((ok, note)) = &self.models_note {
+            let c = if *ok { p.success } else { p.warning };
+            ui.add(egui::Label::new(RichText::new(note).small().color(c)).wrap());
         }
     }
 
@@ -1766,15 +1889,15 @@ fn reply_worker(
     tx: &Sender<Msg>,
     ctx: &egui::Context,
 ) -> anyhow::Result<()> {
-    if !s.is_ready() {
+    // AIS.chat needs its request values; GitHub models do not
+    if !s.is_ready() && !s.uses_github_models() {
         ais::refresh(s)?;
         let _ = tx.send(Msg::SettingsChanged(s.clone()));
     }
     let mut attempt = 0;
     loop {
         let mut got_text = false;
-        let body = ais::build_body(s, history, session);
-        let result = ais::stream_reply(s, body, |ev| {
+        let result = crate::backend::stream(s, history, session, |ev| {
             let msg = match ev {
                 Event::Text(t) => {
                     got_text = true;
@@ -1788,7 +1911,7 @@ fn reply_worker(
         });
         match result {
             Ok(_) => return Ok(()),
-            Err(e) if attempt == 0 && !got_text && ais::is_site_changed(&e) => {
+            Err(e) if attempt == 0 && !got_text && !s.uses_github_models() && ais::is_site_changed(&e) => {
                 attempt += 1;
                 let _ = tx.send(Msg::Activity { conv: conv.to_string(), gen, status: "AIS.chat was updated – reconnecting…".into() });
                 ctx.request_repaint();
