@@ -1,4 +1,5 @@
-//! Where a request goes: the AIS.chat class bot (default) or a free model via GitHub Models.
+//! Where a request goes: the AIS.chat class bot (default) or a free model of an AI provider
+//! (Groq, OpenRouter, Mistral, Gemini, …).
 //! Everything that talks to "the bot" – chats, merging, file placement, greeting translation –
 //! goes through here, so it works the same with either.
 
@@ -7,7 +8,7 @@ use anyhow::Result;
 use crate::ais::{self, AttachmentData, ChatMessage, Event, Role};
 use crate::settings::Settings;
 
-/// For GitHub models: the class bot's own instructions (read from its AIS.chat page) make the
+/// For the free models: the class bot's own instructions (read from its AIS.chat page) make the
 /// model behave like it; plus how answers are shown in the window.
 pub fn system_prompt(s: &Settings) -> String {
     let mut p = String::new();
@@ -52,10 +53,10 @@ pub fn openai_messages(s: &Settings, msgs: &[ChatMessage]) -> Vec<(String, Strin
 
 /// Send the conversation and stream the answer.
 pub fn stream(s: &Settings, msgs: &[ChatMessage], session: &str, mut on_event: impl FnMut(&Event)) -> Result<()> {
-    if s.uses_github_models() {
-        crate::models::stream_chat(&s.models_api, &s.github_token, &s.model, &openai_messages(s, msgs), |t| {
-            on_event(&Event::Text(t.to_string()))
-        })
+    if s.uses_ai_models() {
+        let (base, key) = (s.ai_base(), s.ai_key());
+        let target = crate::models::Target { base: &base, key: &key, model: &s.model, provider: s.ai_provider().name };
+        crate::models::stream_chat(&target, &openai_messages(s, msgs), |t| on_event(&Event::Text(t.to_string())))
     } else {
         ais::stream_reply(s, ais::build_body(s, msgs, session), on_event).map(|_| ())
     }
@@ -85,7 +86,7 @@ mod tests {
     #[test]
     fn builds_openai_messages() {
         let mut s = Settings { character_instructions: "ROLLE\nDu hilfst beim Coden.".into(), language: "en".into(), ..Default::default() };
-        s.model = "openai/gpt-4.1-mini".into();
+        s.model = "llama-3.3-70b-versatile".into();
         let pdf = Attachment { name: "aufgabe.pdf".into(), size: 1, data: AttachmentData::Uploaded("f1".into()) };
         let msgs = vec![
             ChatMessage::greeting("Hallo!"),

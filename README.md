@@ -89,30 +89,37 @@ Settings are stored in your user config folder, **not** in this repository:
 
 Your chats are saved next to it in `conversations.json` (the newest 200).
 
-## Free models via GitHub (optional)
+## Free AI models (optional)
 
 If the class chat is not available (or its limits are reached), a free model can
 answer instead: pick one in the **model list at the top** of the window
-(🎓 *Class bot* is the default; ⚡ entries are free models via
-[GitHub Models](https://github.com/marketplace/models), e.g. GPT-4.1 mini,
-Codestral, Llama). Switching works in the middle of a chat – the next answer
-comes from the chosen model, and it sees the whole conversation.
+(🎓 *Class bot* is the default; ⚡ entries are free models). Switching works in
+the middle of a chat – the next answer comes from the chosen model, and it sees
+the whole conversation.
 
-- It needs a **GitHub token** with the permission **Models: Read**
-  (*Settings → Free models (GitHub)*; fine-grained token → *Account permissions →
-  Models: Read-only*). It is the same token as for saving code – one token can
-  have both permissions.
+Set it up under **⚙ Settings → Free AI models**:
+
+1. Choose a **provider**: **Groq** (default), **OpenRouter**, **Mistral**,
+   **Google Gemini**, or **Other** – any OpenAI-compatible service, e.g. a local
+   Ollama at `http://localhost:11434/v1`.
+2. Get a free **API key** from the provider (the app links to the page) and press
+   **Save key**. The app then reads the provider's model list.
+
+- Each provider has **its own key**, and it is **not** the GitHub token: the
+  GitHub token is only for your repository. Keys are kept in the system's
+  password store (or in `settings.json` on systems that have none).
 - The free models get the class bot's instructions (read from its AIS.chat page),
   so they behave like the class bot. The answer language and everything else work
   the same.
-- Free use has **daily limits per model**; when one is used up, the app says so –
-  pick another model or wait. Models marked "many requests per day" in the list
-  last longest.
-- GitHub models only read **text and code files**; PDFs, images and Office files
-  need the class bot.
-- GitHub Models is a general model service, not restricted to coding, and it
-  is run by GitHub under its own terms (check the age and privacy rules before
-  using it in class).
+- Free use has **limits** (requests per minute/day); when one is reached, the app
+  says so – pick another model or wait.
+- The free models only read **text and code files**; PDFs, images and Office
+  files need the class bot.
+- Check each provider's terms (age limit, whether inputs are used for training)
+  before using it in class.
+
+(GitHub Models, which earlier versions offered here, was shut down by GitHub on
+July 30, 2026.)
 
 ## Attaching files
 
@@ -248,8 +255,8 @@ Without a tag push: on GitHub open **Actions → Build → Run workflow**, tick
 | `src/conversations.rs` | one chat's state, titles, saving/loading the chat list |
 | `src/github.rs` | optional GitHub saving: file names, one commit per push (GitHub REST API) |
 | `src/i18n.rs` | greeting and suggestion cards in the answer language |
-| `src/backend.rs` | sends requests to AIS.chat or to a GitHub model |
-| `src/models.rs` | GitHub Models: model catalog, streaming chat (OpenAI-style API) |
+| `src/backend.rs` | sends requests to AIS.chat or to a free AI model |
+| `src/models.rs` | free AI providers (OpenAI-style API): model lists, streaming chat |
 | `src/settings.rs` | invite-link parsing, cURL import, loading/saving settings |
 | `src/markdown.rs` | Markdown → egui renderer |
 | `src/theme.rs` | colours (light/dark), fonts, widget style, avatar / send button / typing dots |

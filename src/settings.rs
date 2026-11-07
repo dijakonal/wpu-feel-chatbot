@@ -19,6 +19,11 @@ const DEFAULT_BASE: &str = "https://app.ais-chat.schule";
 /// Name of the GitHub token in the system password store.
 const TOKEN_NAME: &str = "github-token";
 
+/// Name of a provider's API key in the system password store.
+fn ai_key_name(provider: &str) -> String {
+    format!("ai-key-{provider}")
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -65,12 +70,18 @@ pub struct Settings {
     /// Empty = https://api.github.com (GitHub Enterprise: https://host/api/v3).
     pub github_api: String,
 
-    /// Which model answers: empty = the AIS.chat class bot, otherwise a GitHub Models id such as
-    /// `openai/gpt-4.1-mini` (free with a GitHub token that has "Models: Read").
+    /// Which model answers: empty = the AIS.chat class bot, otherwise a model of the AI
+    /// provider (`ai_provider`), e.g. `llama-3.3-70b-versatile`.
     pub model: String,
-    /// Empty = https://models.github.ai (other values only for tests).
-    pub models_api: String,
-    /// The class bot's instructions from its AIS.chat page – given to GitHub models so they
+    /// The provider of the free AI models: "groq" (default), "openrouter", "mistral",
+    /// "gemini" or "custom".
+    pub ai_provider: String,
+    /// API address for the provider "custom" (OpenAI-compatible, e.g. https://host/v1).
+    pub ai_base_url: String,
+    /// API key per provider – its own, not the GitHub token. Kept in the system password
+    /// store; written to settings.json only on systems that have none.
+    pub ai_keys: std::collections::BTreeMap<String, String>,
+    /// The class bot's instructions from its AIS.chat page – given to the free models so they
     /// behave like the class bot.
     pub character_instructions: String,
 
@@ -113,9 +124,44 @@ impl Settings {
         self.github_enabled && crate::github::normalize_repo(&self.github_repo).is_some() && !self.github_token.trim().is_empty()
     }
 
-    /// A GitHub model answers instead of the AIS.chat class bot.
-    pub fn uses_github_models(&self) -> bool {
+    /// A free model of the AI provider answers instead of the AIS.chat class bot.
+    pub fn uses_ai_models(&self) -> bool {
         !self.model.trim().is_empty()
+    }
+
+    pub fn ai_provider(&self) -> &'static crate::models::Provider {
+        crate::models::provider(self.ai_provider.trim())
+    }
+
+    /// The provider's API address.
+    pub fn ai_base(&self) -> String {
+        let p = self.ai_provider();
+        if p.id == "custom" { self.ai_base_url.trim().to_string() } else { p.base.to_string() }
+    }
+
+    /// The API key for the current provider.
+    pub fn ai_key(&self) -> String {
+        self.ai_keys.get(self.ai_provider().id).cloned().unwrap_or_default()
+    }
+
+    /// Every secret with its name in the password store: the GitHub token and the AI keys.
+    fn secrets(&self) -> Vec<(String, String)> {
+        let mut out = vec![(TOKEN_NAME.to_string(), self.github_token.trim().to_string())];
+        out.extend(self.ai_keys.iter().map(|(p, k)| (ai_key_name(p), k.trim().to_string())));
+        out
+    }
+
+    /// Remove the secret `name` from these settings if it still has `value`.
+    fn forget_secret(&mut self, name: &str, value: &str) {
+        if name == TOKEN_NAME {
+            if self.github_token.trim() == value {
+                self.github_token.clear();
+            }
+        } else if let Some(p) = name.strip_prefix("ai-key-") {
+            if self.ai_keys.get(p).map(|k| k.trim()) == Some(value) {
+                self.ai_keys.remove(p);
+            }
+        }
     }
 
     pub fn github_folder(&self) -> String {
@@ -264,18 +310,38 @@ impl Settings {
                 let _ = s.apply_invite_link(DEFAULT_INVITE_LINK);
             }
         }
-        // the token in the password store is read in the background (see `load_token`); a
-        // token still in the file (older version, or no store last time) is moved by `save`
-        if !s.github_token.trim().is_empty() {
+        // a model id from the retired GitHub Models (before providers existed): back to the class bot
+        if s.ai_provider.trim().is_empty() && !s.model.trim().is_empty() {
+            s.model.clear();
+        }
+        // secrets in the password store are read in the background (see `load_secrets`);
+        // secrets still in the file (older version, or no store last time) are moved by `save`
+        if s.secrets().iter().any(|(_, v)| !v.is_empty()) {
             let _ = s.save();
         }
         s
     }
 
-    /// The GitHub token from the system password store. Can block for a long time – call it on
-    /// a background thread.
-    pub fn load_token() -> Option<String> {
-        crate::secret::load(TOKEN_NAME)
+    /// The GitHub token and the AI keys from the system password store, as `(name, value)`.
+    /// Can block for a long time – call it on a background thread.
+    pub fn load_secrets() -> Vec<(String, String)> {
+        let mut names = vec![TOKEN_NAME.to_string()];
+        names.extend(crate::models::PROVIDERS.iter().map(|p| ai_key_name(p.id)));
+        names.into_iter().filter_map(|n| crate::secret::load(&n).map(|v| (n, v))).collect()
+    }
+
+    /// Put a secret read from the password store into these settings (if not set already).
+    pub fn set_secret(&mut self, name: &str, value: String) {
+        if name == TOKEN_NAME {
+            if self.github_token.trim().is_empty() {
+                self.github_token = value;
+            }
+        } else if let Some(p) = name.strip_prefix("ai-key-") {
+            let slot = self.ai_keys.entry(p.to_string()).or_default();
+            if slot.trim().is_empty() {
+                *slot = value;
+            }
+        }
     }
 
     /// Write settings.json – right away, without waiting for the password store. The GitHub
@@ -286,21 +352,24 @@ impl Settings {
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("Could not create {}", dir.display()))?;
         }
-        let token = self.github_token.trim().to_string();
         let mut on_disk = self.clone();
-        let status = crate::secret::status(TOKEN_NAME, &token);
-        if status == crate::secret::Status::Stored {
-            on_disk.github_token.clear();
+        let mut to_store = Vec::new();
+        for (name, value) in self.secrets() {
+            match crate::secret::status(&name, &value) {
+                crate::secret::Status::Stored => on_disk.forget_secret(&name, &value),
+                crate::secret::Status::Unknown => to_store.push((name, value)),
+                crate::secret::Status::Unavailable => {}
+            }
         }
         write_settings_file(&p, &on_disk)?;
-        if status == crate::secret::Status::Unknown {
+        if !to_store.is_empty() {
             std::thread::spawn(move || {
-                if crate::secret::store(TOKEN_NAME, &token).is_ok() && !token.is_empty() {
-                    // stored: take it out of the file (if the file still holds this token)
-                    if let Ok(text) = std::fs::read_to_string(&p) {
-                        if let Ok(mut s) = serde_json::from_str::<Settings>(&text) {
-                            if s.github_token.trim() == token {
-                                s.github_token.clear();
+                for (name, value) in to_store {
+                    if crate::secret::store(&name, &value).is_ok() && !value.is_empty() {
+                        // stored: take it out of the file (if the file still holds this value)
+                        if let Ok(text) = std::fs::read_to_string(&p) {
+                            if let Ok(mut s) = serde_json::from_str::<Settings>(&text) {
+                                s.forget_secret(&name, &value);
                                 let _ = write_settings_file(&p, &s);
                             }
                         }
@@ -311,9 +380,14 @@ impl Settings {
         Ok(())
     }
 
-    /// Where the token is kept, as far as known (never blocks).
+    /// Where the GitHub token is kept, as far as known (never blocks).
     pub fn token_status(&self) -> crate::secret::Status {
         crate::secret::status(TOKEN_NAME, self.github_token.trim())
+    }
+
+    /// Where the current provider's API key is kept, as far as known (never blocks).
+    pub fn ai_key_status(&self) -> crate::secret::Status {
+        crate::secret::status(&ai_key_name(self.ai_provider().id), self.ai_key().trim())
     }
 }
 
@@ -394,6 +468,32 @@ mod tests {
         assert!(!s.greeting_needs_translation());
         s.greeting = "Neuer Gruß".into();
         assert_eq!(s.displayed_greeting(), "Neuer Gruß", "a translation of an old greeting is not used");
+    }
+
+    #[test]
+    fn separate_secrets_for_github_and_each_provider() {
+        let mut s = Settings { github_token: "ghp".into(), ..Default::default() };
+        s.ai_keys.insert("groq".into(), "gsk".into());
+        s.ai_keys.insert("mistral".into(), "mst".into());
+        let names: Vec<String> = s.secrets().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["github-token", "ai-key-groq", "ai-key-mistral"]);
+        assert_eq!(s.ai_key(), "gsk", "Groq is the default provider");
+        s.ai_provider = "mistral".into();
+        assert_eq!(s.ai_key(), "mst");
+        assert_eq!(s.ai_base(), "https://api.mistral.ai/v1");
+        s.forget_secret("ai-key-mistral", "mst");
+        s.forget_secret("github-token", "other");
+        assert!(!s.ai_keys.contains_key("mistral") && s.github_token == "ghp");
+        let mut fresh = Settings::default();
+        fresh.set_secret("ai-key-groq", "gsk2".into());
+        fresh.set_secret("github-token", "ghp2".into());
+        assert_eq!((fresh.ai_key(), fresh.github_token.as_str()), ("gsk2".to_string(), "ghp2"));
+    }
+
+    #[test]
+    fn custom_provider_uses_its_address() {
+        let s = Settings { ai_provider: "custom".into(), ai_base_url: " http://localhost:11434/v1 ".into(), ..Default::default() };
+        assert_eq!(s.ai_base(), "http://localhost:11434/v1");
     }
 
     #[test]

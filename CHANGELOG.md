@@ -3,9 +3,12 @@
 ## Unreleased
 
 - **Model list** at the top of the window: the class bot (AIS.chat, default) or a
-  free model via GitHub Models (GPT-4.1 mini, Codestral, Llama, …) – for when the
-  class chat is not available. Needs a GitHub token with "Models: Read". The free
+  free model from **Groq**, **OpenRouter**, **Mistral**, **Google Gemini** or any
+  other OpenAI-compatible service – for when the class chat is not available. Each
+  provider has its own free API key, separate from the GitHub token. The free
   models get the class bot's instructions, and a chat can switch models at any time.
+- The window no longer waits for the system password store (it could freeze for
+  up to 25 seconds on systems without a running keyring).
 
 ## 1.0.1 – 2026-11-06
 
