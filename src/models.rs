@@ -70,6 +70,45 @@ pub struct Model {
     pub id: String,
 }
 
+/// A readable name for a model id: `meta-llama/llama-3.3-70b-instruct:free` →
+/// `Llama 3.3 70B Instruct`, `gemini-2.5-flash` → `Gemini 2.5 Flash`.
+pub fn pretty_name(id: &str) -> String {
+    let base = id.rsplit('/').next().unwrap_or(id);
+    let base = base.split(':').next().unwrap_or(base);
+    base.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let l = w.to_lowercase();
+            let is_size = l.len() > 1 && l.ends_with('b') && l[..l.len() - 1].chars().all(|c| c.is_ascii_digit() || c == '.');
+            match l.as_str() {
+                _ if is_size => l.to_uppercase(),
+                "gpt" | "oss" | "it" | "vl" => l.to_uppercase(),
+                _ => {
+                    let mut c = w.chars();
+                    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+                }
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+/// Short labels for the model menu: "free", "code" (made for programming), "fast".
+pub fn model_tags(id: &str) -> Vec<&'static str> {
+    let l = id.to_lowercase();
+    let mut tags = Vec::new();
+    if l.ends_with(":free") {
+        tags.push("free");
+    }
+    if ["coder", "codestral", "devstral", "code-"].iter().any(|w| l.contains(w)) {
+        tags.push("code");
+    }
+    if ["instant", "flash", "mini", "-8b", "small"].iter().any(|w| l.contains(w)) {
+        tags.push("fast");
+    }
+    tags
+}
+
 pub fn suggested_models(p: &Provider) -> Vec<Model> {
     p.suggested.iter().map(|id| Model { id: id.to_string() }).collect()
 }
@@ -380,6 +419,20 @@ mod tests {
         assert!(describe_error(401, "{}", "m", "Groq").to_string().contains("API key"));
         assert!(describe_error(404, "{}", "x", "Groq").to_string().contains("does not know x"));
         assert!(describe_error(400, r#"{"error":{"message":"context length exceeded"}}"#, "m", "Groq").to_string().contains("too long"));
+    }
+
+    #[test]
+    fn readable_names_and_tags() {
+        assert_eq!(pretty_name("llama-3.3-70b-versatile"), "Llama 3.3 70B Versatile");
+        assert_eq!(pretty_name("meta-llama/llama-3.3-70b-instruct:free"), "Llama 3.3 70B Instruct");
+        assert_eq!(pretty_name("qwen/qwen3-32b"), "Qwen3 32B");
+        assert_eq!(pretty_name("gemini-2.5-flash"), "Gemini 2.5 Flash");
+        assert_eq!(pretty_name("openai/gpt-oss-120b"), "GPT OSS 120B");
+        assert_eq!(pretty_name("gemma2-9b-it"), "Gemma2 9B IT");
+        assert_eq!(model_tags("qwen/qwen-2.5-coder-32b-instruct:free"), ["free", "code"]);
+        assert_eq!(model_tags("llama-3.1-8b-instant"), ["fast"]);
+        assert_eq!(model_tags("codestral-latest"), ["code"]);
+        assert!(model_tags("llama-3.3-70b-versatile").is_empty());
     }
 
     #[test]

@@ -96,6 +96,10 @@ pub struct App {
     /// Free models for the model list (built-in list until the catalog is read).
     models: Vec<crate::models::Model>,
     models_loading: bool,
+    /// Search text in the model menu.
+    model_filter: String,
+    /// The model menu was just opened: scroll the current model into view once.
+    scroll_to_model: bool,
     models_note: Option<(bool, String)>,
     /// GitHub state of code blocks, by `<message id>#<n>`.
     push_states: std::collections::HashMap<String, PushState>,
@@ -137,6 +141,8 @@ impl App {
             repo_picker: None,
             models: Vec::new(),
             models_loading: false,
+            model_filter: String::new(),
+            scroll_to_model: false,
             models_note: None,
             push_states: Default::default(),
             tx,
@@ -1644,7 +1650,7 @@ impl App {
     /// Which model answers: the AIS.chat class bot, or a free model of the AI provider.
     fn model_picker(&mut self, ui: &mut egui::Ui, p: theme::Palette) {
         let current = self.settings.model.clone();
-        let label = if current.is_empty() { "🎓 Class bot".to_string() } else { format!("⚡ {current}") };
+        let label = if current.is_empty() { "🎓 Class bot".to_string() } else { format!("⚡ {}", crate::models::pretty_name(&current)) };
         let provider = self.settings.ai_provider();
         let has_key = !self.settings.ai_key().trim().is_empty();
         let mut choice = current.clone();
@@ -1663,33 +1669,75 @@ impl App {
         let menu = ui.make_persistent_id("model-menu");
         if button.clicked() {
             ui.memory_mut(|m| m.toggle_popup(menu));
+            self.model_filter.clear();
+            self.scroll_to_model = true;
         }
-        egui::popup::popup_below_widget(ui, menu, &button, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-            ui.set_min_width(300.0);
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            ui.label(RichText::new("AIS.chat").small().family(theme::bold()).color(p.weak));
-            ui.selectable_value(&mut choice, String::new(), format!("🎓 Class bot · {}", self.settings.display_name()))
-                .on_hover_text("The shared class chat – also reads PDFs, images and Office files");
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Free via {}", provider.name)).small().family(theme::bold()).color(p.weak));
-                if self.models_loading {
-                    ui.add(egui::Spinner::new().size(12.0));
+        let mut close = false;
+        // closes on a click outside (or after choosing) – not when typing in the search field
+        egui::popup::popup_below_widget(ui, menu, &button, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+            ui.set_width(360.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+
+            menu_heading(ui, p, "AIS.chat", None);
+            let class = format!("Class bot · {}", self.settings.display_name());
+            if menu_row(ui, p, choice.is_empty(), "🎓", &class, "Also reads PDFs, images and Office files", &[]).clicked() {
+                choice.clear();
+                close = true;
+            }
+
+            ui.add_space(6.0);
+            menu_heading(ui, p, &format!("Free via {}", provider.name), self.models_loading.then_some(()));
+            if !has_key {
+                ui.add(egui::Label::new(RichText::new(format!("{} needs a free API key.", provider.name)).small().color(p.warning)).wrap());
+            } else if self.models.is_empty() {
+                ui.label(RichText::new("No models yet – check the key in Settings.").small().color(p.weak));
+            } else {
+                if self.models.len() > 6 {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.model_filter)
+                            .hint_text("🔍 Search models")
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::Margin::symmetric(8.0, 6.0)),
+                    );
+                    ui.add_space(2.0);
                 }
-            });
-            if has_key {
-                egui::ScrollArea::vertical().id_salt("model-list").max_height(360.0).show(ui, |ui| {
-                    for m in &self.models {
-                        ui.selectable_value(&mut choice, m.id.clone(), format!("⚡ {}", m.id));
+                let filter = self.model_filter.trim().to_lowercase();
+                let shown: Vec<&crate::models::Model> = self
+                    .models
+                    .iter()
+                    .filter(|m| filter.is_empty() || m.id.to_lowercase().contains(&filter) || crate::models::pretty_name(&m.id).to_lowercase().contains(&filter))
+                    .collect();
+                if shown.is_empty() {
+                    ui.label(RichText::new("No model matches.").small().color(p.weak));
+                }
+                egui::ScrollArea::vertical().id_salt("model-list").max_height(320.0).show(ui, |ui| {
+                    for m in shown {
+                        let name = crate::models::pretty_name(&m.id);
+                        let tags = crate::models::model_tags(&m.id);
+                        let row = menu_row(ui, p, choice == m.id, "⚡", &name, &m.id, &tags);
+                        if choice == m.id && self.scroll_to_model {
+                            row.scroll_to_me(Some(Align::Center));
+                            self.scroll_to_model = false;
+                        }
+                        if row.clicked() {
+                            choice = m.id.clone();
+                            close = true;
+                        }
                     }
                 });
-            } else {
-                ui.label(RichText::new(format!("{} needs a free API key.", provider.name)).small().color(p.warning));
-                if ui.button("Set up in Settings…").clicked() {
-                    open_settings = true;
-                }
+            }
+
+            ui.add_space(4.0);
+            ui.separator();
+            let label = if has_key { "⚙  Provider & key…" } else { "⚙  Set up a free model…" };
+            if ui.add(theme::Btn::new(theme::Kind::Ghost, label).min_size(egui::vec2(0.0, 30.0))).clicked() {
+                open_settings = true;
+                close = true;
             }
         });
+        if close {
+            ui.memory_mut(|m| m.close_popup());
+        }
         button.on_hover_text("Which model answers");
         if open_settings {
             self.open_settings();
@@ -2193,6 +2241,60 @@ fn message_row(
         }
     }
     clicked
+}
+
+/// A small grey heading in the model menu, with a spinner while something loads.
+fn menu_heading(ui: &mut egui::Ui, p: theme::Palette, text: &str, loading: Option<()>) {
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        ui.label(RichText::new(text.to_uppercase()).size(11.0).family(theme::bold()).color(p.weak));
+        if loading.is_some() {
+            ui.add(egui::Spinner::new().size(11.0));
+        }
+    });
+}
+
+/// One choice in the model menu: icon, name, a line below, tags, and a ✓ when selected.
+fn menu_row(ui: &mut egui::Ui, p: theme::Palette, selected: bool, icon: &str, title: &str, sub: &str, tags: &[&str]) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 46.0), egui::Sense::click());
+    let t = theme::hover_anim(ui, resp.id, resp.hovered());
+    let fill = if selected { p.accent_soft } else { theme::mix(Color32::TRANSPARENT, p.surface_hi, t) };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 10.0, fill);
+
+    // icon in a small circle
+    let ic = egui::pos2(rect.left() + 22.0, rect.center().y);
+    painter.circle_filled(ic, 14.0, if selected { p.accent } else { p.surface_hi });
+    painter.text(ic, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(14.0), if selected { p.on_accent } else { p.text });
+
+    // tags and ✓ on the right
+    let mut right = rect.right() - 10.0;
+    if selected {
+        painter.text(egui::pos2(right, rect.center().y), egui::Align2::RIGHT_CENTER, "✔", egui::FontId::proportional(14.0), p.accent_hover);
+        right -= 22.0;
+    }
+    for tag in tags.iter().rev() {
+        let galley = painter.layout_no_wrap(tag.to_string(), egui::FontId::proportional(10.5), p.accent_hover);
+        let pill = egui::Rect::from_min_size(
+            egui::pos2(right - galley.size().x - 12.0, rect.center().y - 9.0),
+            egui::vec2(galley.size().x + 12.0, 18.0),
+        );
+        painter.rect_filled(pill, 999.0, p.accent_soft);
+        painter.galley(pill.center() - galley.size() / 2.0, galley, p.accent_hover);
+        right = pill.left() - 4.0;
+    }
+
+    // name and the line below, shortened to the room left
+    let left = rect.left() + 44.0;
+    let room = right - left - 4.0;
+    let title_font = egui::FontId::new(14.0, theme::bold());
+    let sub_font = egui::FontId::proportional(11.5);
+    let title = fit_text(ui, title, &title_font, room);
+    let sub = fit_text(ui, sub, &sub_font, room);
+    let painter = ui.painter();
+    painter.text(egui::pos2(left, rect.top() + 7.0), egui::Align2::LEFT_TOP, title, title_font, p.text);
+    painter.text(egui::pos2(left, rect.top() + 26.0), egui::Align2::LEFT_TOP, sub, sub_font, p.weak);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A card inside the Settings dialog.
