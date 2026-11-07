@@ -38,6 +38,8 @@ enum Msg {
     RepoListed(Result<(String, Vec<github::RepoFile>, bool), String>),
     /// One file from the repository was read for an attachment.
     RepoFileLoaded { conv: String, id: u64, result: Result<String, String> },
+    /// The GitHub token was read from the password store (in the background, at start).
+    TokenLoaded(Option<String>),
     /// The GitHub Models catalog was read.
     ModelsLoaded(Result<Vec<crate::models::Model>, String>),
     /// The bot translated its greeting (`None`: it did not work).
@@ -145,6 +147,15 @@ impl App {
         app.new_chat();
         app.start_refresh(false);
         app.load_models();
+        // the password store can take long to answer (or not exist): never wait for it here
+        if app.settings.github_token.trim().is_empty() {
+            let tx = app.tx.clone();
+            let ctx = app.ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(Msg::TokenLoaded(Settings::load_token()));
+                ctx.request_repaint();
+            });
+        }
         install_quote_capture(&cc.egui_ctx);
         app
     }
@@ -457,6 +468,14 @@ impl App {
                             Ok(text) => FileState::Ready(AttachmentData::Inline(text)),
                             Err(e) => FileState::Failed(e),
                         };
+                    }
+                }
+                Msg::TokenLoaded(token) => {
+                    if let Some(t) = token.filter(|t| !t.trim().is_empty()) {
+                        if self.settings.github_token.trim().is_empty() {
+                            self.settings.github_token = t.clone();
+                            self.draft.github_token = t;
+                        }
                     }
                 }
                 Msg::ModelsLoaded(result) => {
@@ -1013,10 +1032,10 @@ impl App {
             ui.end_row();
             ui.label("Token");
             ui.add(egui::TextEdit::singleline(&mut self.draft.github_token).password(true).hint_text("github_pat_…").desired_width(w))
-                .on_hover_text(if self.settings.token_is_in_keystore() {
-                    "Kept in your system's password store (not in settings.json)."
-                } else {
-                    "This system has no password store, so the token is kept in settings.json."
+                .on_hover_text(match self.settings.token_status() {
+                    crate::secret::Status::Stored => "Kept in your system's password store (not in settings.json).",
+                    crate::secret::Status::Unavailable => "This system has no password store, so the token is kept in settings.json.",
+                    crate::secret::Status::Unknown => "Kept in your system's password store if there is one, otherwise in settings.json.",
                 });
             ui.end_row();
             ui.label("Branch");

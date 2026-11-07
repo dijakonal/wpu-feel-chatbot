@@ -264,37 +264,64 @@ impl Settings {
                 let _ = s.apply_invite_link(DEFAULT_INVITE_LINK);
             }
         }
-        if s.github_token.trim().is_empty() {
-            if let Some(t) = crate::secret::load(TOKEN_NAME) {
-                s.github_token = t;
-            }
-        } else {
-            // a token in the file (older version, or no password store last time): move it
-            // into the store and out of the file if that works now
+        // the token in the password store is read in the background (see `load_token`); a
+        // token still in the file (older version, or no store last time) is moved by `save`
+        if !s.github_token.trim().is_empty() {
             let _ = s.save();
         }
         s
     }
 
-    /// Write settings.json. The GitHub token goes to the system password store; only if
-    /// there is none does it stay in the file (so it is never lost).
+    /// The GitHub token from the system password store. Can block for a long time – call it on
+    /// a background thread.
+    pub fn load_token() -> Option<String> {
+        crate::secret::load(TOKEN_NAME)
+    }
+
+    /// Write settings.json – right away, without waiting for the password store. The GitHub
+    /// token stays in the file until the store (in the background) has taken it; then it is
+    /// removed from the file. Without a store it stays there, so it is never lost.
     pub fn save(&self) -> Result<()> {
         let p = Self::path().ok_or_else(|| anyhow!("No user config folder on this system."))?;
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("Could not create {}", dir.display()))?;
         }
+        let token = self.github_token.trim().to_string();
         let mut on_disk = self.clone();
-        if crate::secret::store(TOKEN_NAME, self.github_token.trim()).is_ok() {
+        let status = crate::secret::status(TOKEN_NAME, &token);
+        if status == crate::secret::Status::Stored {
             on_disk.github_token.clear();
         }
-        std::fs::write(&p, serde_json::to_string_pretty(&on_disk)?).with_context(|| format!("Could not write {}", p.display()))?;
+        write_settings_file(&p, &on_disk)?;
+        if status == crate::secret::Status::Unknown {
+            std::thread::spawn(move || {
+                if crate::secret::store(TOKEN_NAME, &token).is_ok() && !token.is_empty() {
+                    // stored: take it out of the file (if the file still holds this token)
+                    if let Ok(text) = std::fs::read_to_string(&p) {
+                        if let Ok(mut s) = serde_json::from_str::<Settings>(&text) {
+                            if s.github_token.trim() == token {
+                                s.github_token.clear();
+                                let _ = write_settings_file(&p, &s);
+                            }
+                        }
+                    }
+                }
+            });
+        }
         Ok(())
     }
 
-    /// Whether the token is in the system password store (checks by saving it there).
-    pub fn token_is_in_keystore(&self) -> bool {
-        self.github_token.trim().is_empty() || crate::secret::store(TOKEN_NAME, self.github_token.trim()).is_ok()
+    /// Where the token is kept, as far as known (never blocks).
+    pub fn token_status(&self) -> crate::secret::Status {
+        crate::secret::status(TOKEN_NAME, self.github_token.trim())
     }
+}
+
+/// Settings are written from the window and from the background token saver.
+fn write_settings_file(p: &std::path::Path, s: &Settings) -> Result<()> {
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = WRITING.lock();
+    std::fs::write(p, serde_json::to_string_pretty(s)?).with_context(|| format!("Could not write {}", p.display()))
 }
 
 /// `(https://host, character id, invite code)`

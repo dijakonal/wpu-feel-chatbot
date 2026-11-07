@@ -23,7 +23,7 @@ fn failed() -> &'static Mutex<HashMap<String, String>> {
     FAILED.get_or_init(Default::default)
 }
 
-/// Save `value` under `name` (an empty value removes it).
+/// Save `value` under `name` (an empty value removes it). Can block like [`load`].
 pub fn store(name: &str, value: &str) -> Result<()> {
     let same = |m: &Mutex<HashMap<String, String>>| m.lock().map(|k| k.get(name).map(String::as_str) == Some(value)).unwrap_or(false);
     if same(known()) {
@@ -48,7 +48,30 @@ pub fn store(name: &str, value: &str) -> Result<()> {
     result
 }
 
-/// The value saved under `name`, if the store has one.
+/// Where a value is, as far as known without touching the store (never blocks).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Status {
+    /// In the password store.
+    Stored,
+    /// The store could not take it (none on this system).
+    Unavailable,
+    /// Not tried yet / still being saved.
+    Unknown,
+}
+
+pub fn status(name: &str, value: &str) -> Status {
+    let has = |m: &Mutex<HashMap<String, String>>| m.lock().map(|k| k.get(name).map(String::as_str) == Some(value)).unwrap_or(false);
+    if has(known()) {
+        Status::Stored
+    } else if has(failed()) {
+        Status::Unavailable
+    } else {
+        Status::Unknown
+    }
+}
+
+/// The value saved under `name`, if the store has one. Can block for a long time (D-Bus may
+/// wait for a password store to start) – call it on a background thread.
 pub fn load(name: &str) -> Option<String> {
     let value = keyring::Entry::new(SERVICE, name).ok()?.get_password().ok()?;
     if let Ok(mut k) = known().lock() {
