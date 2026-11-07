@@ -102,16 +102,41 @@ fn describe_error(status: u16, body: &str, model: &str) -> anyhow::Error {
     }
 }
 
+/// The text in one answer object: `choices[0].delta.content` (stream) or
+/// `choices[0].message.content` (whole answer); `content` may also be a list of parts
+/// (`[{"type":"text","text":"…"}]`).
+pub fn text_of(v: &Value) -> String {
+    let choice = &v["choices"][0];
+    let content = [&choice["delta"]["content"], &choice["message"]["content"], &choice["text"]]
+        .into_iter()
+        .find(|c| !c.is_null())
+        .cloned()
+        .unwrap_or(Value::Null);
+    match content {
+        Value::String(t) => t,
+        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str().or(p.as_str())).collect(),
+        _ => String::new(),
+    }
+}
+
 /// Decoder for Server-Sent Events: collects the text pieces of `data:` lines.
 #[derive(Default)]
 pub struct SseParser {
     buf: Vec<u8>,
     pub done: bool,
+    /// Whether any `data:` line came at all (if not, the answer was plain JSON).
+    pub saw_data: bool,
+    /// The raw answer (up to 1 MB) – parsed as plain JSON if it was no stream, and shown
+    /// shortened if no text could be found at all.
+    pub raw: Vec<u8>,
 }
 
 impl SseParser {
     /// Feed bytes; returns the text pieces found in complete lines.
     pub fn feed(&mut self, data: &[u8]) -> Result<Vec<String>> {
+        if self.raw.len() < 1 << 20 {
+            self.raw.extend_from_slice(data);
+        }
         self.buf.extend_from_slice(data);
         let mut out = Vec::new();
         while let Some(nl) = self.buf.iter().position(|&b| b == b'\n') {
@@ -119,6 +144,7 @@ impl SseParser {
             let line = String::from_utf8_lossy(&line);
             let line = line.trim();
             let Some(payload) = line.strip_prefix("data:").map(str::trim) else { continue };
+            self.saw_data = true;
             if payload == "[DONE]" {
                 self.done = true;
                 continue;
@@ -130,10 +156,9 @@ impl SseParser {
             if let Some(e) = v["error"]["message"].as_str() {
                 bail!("GitHub Models: {e}");
             }
-            if let Some(t) = v["choices"][0]["delta"]["content"].as_str() {
-                if !t.is_empty() {
-                    out.push(t.to_string());
-                }
+            let t = text_of(&v);
+            if !t.is_empty() {
+                out.push(t);
             }
         }
         Ok(out)
@@ -141,22 +166,47 @@ impl SseParser {
 }
 
 /// Send `messages` (`(role, content)`, roles "system"/"user"/"assistant") and stream the answer.
+/// If the streamed answer brings no text (some models do not stream), it is asked once more
+/// without streaming.
 pub fn stream_chat(api: &str, token: &str, model: &str, messages: &[(String, String)], mut on_text: impl FnMut(&str)) -> Result<()> {
     if token.trim().is_empty() {
         bail!("Free models need a GitHub token: add one in Settings → Free models (GitHub).");
     }
+    if request(api, token, model, messages, true, &mut on_text)?.got_text {
+        return Ok(());
+    }
+    let second = request(api, token, model, messages, false, &mut on_text)?;
+    if second.got_text {
+        return Ok(());
+    }
+    bail!(
+        "{model} sent no text (answer: {}, \"{}\"). Try again or pick another model.",
+        second.content_type,
+        String::from_utf8_lossy(&second.raw).chars().filter(|c| !c.is_control()).take(160).collect::<String>()
+    )
+}
+
+struct Outcome {
+    got_text: bool,
+    content_type: String,
+    raw: Vec<u8>,
+}
+
+fn request(api: &str, token: &str, model: &str, messages: &[(String, String)], stream: bool, on_text: &mut impl FnMut(&str)) -> Result<Outcome> {
     let msgs: Vec<Value> = messages.iter().map(|(role, content)| json!({"role": role, "content": content})).collect();
-    let body = json!({"model": model, "messages": msgs, "stream": true});
+    let body = json!({"model": model, "messages": msgs, "stream": stream});
     let mut resp = client(300)?
         .post(format!("{}/inference/chat/completions", base(api)))
         .header("Authorization", format!("Bearer {}", token.trim()))
-        .header("Accept", "text/event-stream")
+        // as in GitHub's documentation, also for streaming
+        .header("Accept", "application/vnd.github+json")
         .header("Content-Type", "application/json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .body(body.to_string())
         .send()
         .map_err(|e| if e.is_connect() || e.is_timeout() { anyhow!("Could not reach GitHub Models.") } else { anyhow!(e) })?;
     let status = resp.status().as_u16();
+    let content_type = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("no type").to_string();
     if !(200..300).contains(&status) {
         let text = resp.text().unwrap_or_default();
         return Err(describe_error(status, &text, model));
@@ -182,10 +232,20 @@ pub fn stream_chat(api: &str, token: &str, model: &str, messages: &[(String, Str
         got_text = true;
         on_text(&t);
     }
-    if !got_text {
-        bail!("{model} sent an empty answer. Try again or pick another model.");
+    // not a stream: the whole answer as one JSON object
+    if !got_text && !parser.saw_data {
+        if let Ok(v) = serde_json::from_slice::<Value>(&parser.raw) {
+            if let Some(e) = v["error"]["message"].as_str() {
+                bail!("GitHub Models: {e}");
+            }
+            let t = text_of(&v);
+            if !t.is_empty() {
+                got_text = true;
+                on_text(&t);
+            }
+        }
     }
-    Ok(())
+    Ok(Outcome { got_text, content_type, raw: parser.raw })
 }
 
 #[cfg(test)]
@@ -211,6 +271,41 @@ mod tests {
             assert_eq!(text, "Hallo, 🐍 Welt", "chunk size {size}");
             assert!(p.done);
         }
+    }
+
+    #[test]
+    fn reads_every_answer_shape() {
+        // whole answer (no stream), content as text
+        let whole: Value = serde_json::from_str(r#"{"choices":[{"message":{"role":"assistant","content":"Hallo"}}]}"#).unwrap();
+        assert_eq!(text_of(&whole), "Hallo");
+        // content as a list of parts
+        let parts: Value = serde_json::from_str(r#"{"choices":[{"delta":{"content":[{"type":"text","text":"Hal"},{"type":"text","text":"lo"}]}}]}"#).unwrap();
+        assert_eq!(text_of(&parts), "Hallo");
+        // filter results / usage only
+        let none: Value = serde_json::from_str(r#"{"choices":[],"prompt_filter_results":[]}"#).unwrap();
+        assert_eq!(text_of(&none), "");
+        // Windows line endings
+        let mut p = SseParser::default();
+        let t = p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\r\n\r\ndata: [DONE]\r\n").unwrap();
+        assert_eq!(t, ["ok"]);
+        assert!(p.done && p.saw_data);
+    }
+
+    /// Needs the stand-in server: `cargo test -- --ignored live_models_shapes`
+    #[test]
+    #[ignore]
+    fn live_models_shapes() {
+        let api = "http://127.0.0.1:8777";
+        let msgs = vec![("user".to_string(), "Hallo?".to_string())];
+        for model in ["openai/gpt-4.1-mini", "mistral-ai/codestral-2501", "meta/llama-3.3-70b-instruct"] {
+            let mut text = String::new();
+            stream_chat(api, "t", model, &msgs, |t| text.push_str(t)).unwrap();
+            println!("{model}: {text}");
+            assert!(text.contains("Hallo?"), "{model}: {text}");
+        }
+        let e = stream_chat(api, "t", "microsoft/phi-4", &msgs, |_| {}).unwrap_err().to_string();
+        println!("phi-4: {e}");
+        assert!(e.contains("sent no text") && e.contains("application/json"), "{e}");
     }
 
     #[test]
