@@ -5,6 +5,15 @@
 - **Pick up where you left off:** the app opens on your last chat. A new chat
   shows a **Continue where you left off** button and your **recent chats** (with
   a preview of the last message) above the suggestions.
+- **Tidier chat list:** chats are grouped under *Today*, *Yesterday*, *Last 7 days*
+  and *Older*, and each shows the start of its last message. Hovering a chat shows
+  rename ✏ and delete 🗑 buttons.
+- **Deleting a chat** happens at once, without a confirmation box, and a notice at
+  the bottom offers **Undo** for a few seconds.
+- The **Reply** button only appears after you select text by dragging, not after
+  a plain click into an answer.
+- **Settings** are split into tabs: *General*, *Free AI models*, *GitHub* and
+  *Advanced*.
 
 - **Model list** at the top of the window: the class bot (AIS.chat, default) or a
   free model from **Groq**, **OpenRouter**, **Mistral**, **Google Gemini** or any

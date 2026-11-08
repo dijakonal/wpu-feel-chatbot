@@ -161,6 +161,22 @@ pub fn save(list: &[Conversation]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The heading a chat is listed under in the side list.
+pub fn day_group(unix: i64) -> &'static str {
+    day_group_at(unix, chrono::Local::now().date_naive())
+}
+
+fn day_group_at(unix: i64, today: chrono::NaiveDate) -> &'static str {
+    use chrono::{Local, TimeZone};
+    let Some(day) = Local.timestamp_opt(unix, 0).single().map(|t| t.date_naive()) else { return "Older" };
+    match (today - day).num_days() {
+        d if d <= 0 => "Today",
+        1 => "Yesterday",
+        2..=6 => "Last 7 days",
+        _ => "Older",
+    }
+}
+
 /// "14:05" for today, "Yesterday", or "06.11.2026".
 pub fn when(unix: i64) -> String {
     use chrono::{Local, TimeZone};
@@ -208,6 +224,17 @@ mod tests {
         a.content = "## Lists in **Python**\n\n```python\nx = []\n```".into();
         c.messages.push(a);
         assert_eq!(c.preview(), "Lists in Python");
+    }
+
+    #[test]
+    fn groups_by_day() {
+        use chrono::{Local, TimeZone};
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let at = |d: u32| Local.with_ymd_and_hms(2026, 11, d, 12, 0, 0).unwrap().timestamp();
+        assert_eq!(day_group_at(at(8), today), "Today");
+        assert_eq!(day_group_at(at(7), today), "Yesterday");
+        assert_eq!(day_group_at(at(3), today), "Last 7 days");
+        assert_eq!(day_group_at(at(1), today), "Older");
     }
 
     #[test]

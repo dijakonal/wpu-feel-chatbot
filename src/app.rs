@@ -69,7 +69,8 @@ pub struct App {
     active: usize,
     show_sidebar: bool,
     renaming: Option<(String, String)>,
-    confirm_delete: Option<String>,
+    /// The chat deleted last and when (`ctx` time) – it can be brought back for a few seconds.
+    undo_delete: Option<(Conversation, f64)>,
     next_file_id: u64,
     focus_input: bool,
     /// Where the floating "Reply" button sits while text is selected (last frame).
@@ -79,6 +80,8 @@ pub struct App {
     selection_anchor: Option<(egui::Pos2, bool)>,
     /// Where the current/last drag started.
     drag_origin: Option<egui::Pos2>,
+    /// Open page of the settings dialog (0 General, 1 Free AI models, 2 GitHub, 3 Advanced).
+    settings_tab: usize,
 
     // settings window
     show_settings: bool,
@@ -125,12 +128,13 @@ impl App {
             active: 0,
             show_sidebar: true,
             renaming: None,
-            confirm_delete: None,
+            undo_delete: None,
             next_file_id: 0,
             focus_input: true,
             reply_button: None,
             selection_anchor: None,
             drag_origin: None,
+            settings_tab: 0,
             show_settings: false,
             curl_input: String::new(),
             settings_note: None,
@@ -354,7 +358,6 @@ impl App {
     /// Open an empty chat: reuse one that is still empty, otherwise start a new one.
     fn new_chat(&mut self) {
         self.renaming = None;
-        self.confirm_delete = None;
         self.focus_input = true;
         if let Some(i) = self.convs.iter().position(|c| c.is_empty() && !c.busy) {
             self.active = i;
@@ -377,14 +380,73 @@ impl App {
     fn delete_chat(&mut self, id: &str) {
         let Some(i) = self.convs.iter().position(|c| c.id == id) else { return };
         let open_id = self.id.clone();
-        self.convs.remove(i);
-        self.confirm_delete = None;
+        let removed = self.convs.remove(i);
+        self.undo_delete = Some((removed, self.ctx.input(|i| i.time)));
         if self.convs.is_empty() {
             self.convs.push(Conversation::new(&self.greeting()));
         }
         // keep the open chat open; if it was the deleted one, open the newest
         self.active = self.convs.iter().position(|c| c.id == open_id).unwrap_or_else(|| self.newest_index());
         self.save_chats();
+    }
+
+    /// Bring the chat deleted last back.
+    fn undo_delete_chat(&mut self) {
+        let Some((c, _)) = self.undo_delete.take() else { return };
+        // added at the end, so the open chat keeps its index
+        self.convs.push(c);
+        self.save_chats();
+    }
+
+    /// The notice at the bottom after deleting a chat, with "Undo" (for 6 seconds).
+    fn undo_toast(&mut self, ctx: &egui::Context) {
+        const SHOW_FOR: f64 = 6.0;
+        let Some((c, at)) = &self.undo_delete else { return };
+        let left = SHOW_FOR - (ctx.input(|i| i.time) - at);
+        if left <= 0.0 {
+            self.undo_delete = None;
+            return;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        let p = theme::palette(ctx.style().visuals.dark_mode);
+        let title = c.title();
+        let screen = ctx.screen_rect();
+        let mut undo = false;
+        let mut dismiss = false;
+        egui::Area::new(egui::Id::new("undo-toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -110.0])
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(p.surface_hi)
+                    .stroke(Stroke::new(1.0_f32, p.border))
+                    .rounding(12.0)
+                    .shadow(egui::epaint::Shadow { offset: egui::vec2(0.0, 6.0), blur: 20.0, spread: 0.0, color: Color32::from_black_alpha(80) })
+                    .inner_margin(egui::Margin { left: 14.0, right: 8.0, top: 6.0, bottom: 6.0 })
+                    .show(ui, |ui| {
+                        ui.set_max_width((screen.width() - 80.0).min(460.0));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("🗑").color(p.weak));
+                            let text = fit_end(ui, &format!("Deleted “{title}”"), &egui::TextStyle::Body.resolve(ui.style()), 260.0);
+                            ui.label(RichText::new(text).color(p.text));
+                            if ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new("Undo").family(theme::bold())).min_size(egui::vec2(0.0, 30.0))).clicked() {
+                                undo = true;
+                            }
+                            if theme::ghost_button(ui, "✖").on_hover_text("Dismiss").clicked() {
+                                dismiss = true;
+                            }
+                        });
+                        // how long "Undo" is still possible
+                        let r = ui.min_rect();
+                        let bar = egui::Rect::from_min_size(egui::pos2(r.left(), r.bottom() + 3.0), egui::vec2(r.width() * (left / SHOW_FOR) as f32, 2.0));
+                        ui.painter().rect_filled(bar, 1.0, p.accent);
+                    });
+            });
+        if undo {
+            self.undo_delete_chat();
+        } else if dismiss {
+            self.undo_delete = None;
+        }
     }
 
     fn newest_index(&self) -> usize {
@@ -630,14 +692,14 @@ impl App {
             });
     }
 
-    /// The list of chats on the left.
+    /// The list of chats on the left, grouped by day.
     fn sidebar(&mut self, ctx: &egui::Context) {
         if !self.show_sidebar {
             return;
         }
         let p = theme::palette(ctx.style().visuals.dark_mode);
         egui::SidePanel::left("chats")
-            .exact_width(250.0)
+            .exact_width(260.0)
             .resizable(false)
             .show_separator_line(false)
             .frame(egui::Frame::none().fill(p.panel).stroke(Stroke::new(1.0_f32, p.border)).inner_margin(egui::Margin::symmetric(10.0, 12.0)))
@@ -647,9 +709,7 @@ impl App {
                 if new.on_hover_text("Start a new chat (this one stays in the list)").clicked() {
                     self.new_chat();
                 }
-                ui.add_space(8.0);
-                ui.label(RichText::new("Chats").small().family(theme::bold()).color(p.weak));
-                ui.add_space(2.0);
+                ui.add_space(6.0);
 
                 let mut order: Vec<usize> = (0..self.convs.len()).collect();
                 order.sort_by(|&a, &b| self.convs[b].updated.cmp(&self.convs[a].updated));
@@ -657,11 +717,23 @@ impl App {
                 let mut open = None;
                 let mut delete = None;
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let mut group = "";
                     for i in order {
                         let c = &self.convs[i];
                         // the open chat is listed even while empty; other empty chats are not
                         if c.is_empty() && c.id != active_id {
                             continue;
+                        }
+                        let g = conversations::day_group(c.updated);
+                        if g != group {
+                            group = g;
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(8.0);
+                                ui.label(RichText::new(g.to_uppercase()).size(10.5).family(theme::bold()).color(p.weak));
+                            });
+                            ui.add_space(2.0);
                         }
                         match self.chat_row(ui, i, c.id == active_id, p) {
                             RowAction::None => {}
@@ -678,6 +750,8 @@ impl App {
             });
     }
 
+    /// One chat in the side list: title, a line from the last message, and – on hover –
+    /// rename and delete.
     fn chat_row(&mut self, ui: &mut egui::Ui, i: usize, active: bool, p: theme::Palette) -> RowAction {
         let id = self.convs[i].id.clone();
         let w = ui.available_width();
@@ -686,7 +760,12 @@ impl App {
         // renaming: a text field instead of the title
         if let Some((rid, text)) = &mut self.renaming {
             if *rid == id {
-                let r = ui.add(egui::TextEdit::singleline(text).desired_width(w).margin(egui::Margin::symmetric(10.0, 8.0)));
+                let r = ui.add(
+                    egui::TextEdit::singleline(text)
+                        .desired_width(w)
+                        .margin(egui::Margin::symmetric(10.0, 12.0))
+                        .hint_text("Name of the chat"),
+                );
                 r.request_focus();
                 let done = r.lost_focus() || ui.input(|i| i.key_pressed(Key::Enter));
                 let cancel = ui.input(|i| i.key_pressed(Key::Escape));
@@ -698,59 +777,56 @@ impl App {
                     self.renaming = None;
                     self.save_chats();
                 }
-                ui.add_space(2.0);
+                ui.label(RichText::new("Enter to save · Esc to cancel").size(10.5).color(p.weak));
                 return RowAction::None;
             }
         }
 
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 50.0), egui::Sense::click());
-        let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 52.0), egui::Sense::click());
+        let hovered = ui.rect_contains_pointer(rect);
         let t = theme::hover_anim(ui, row_id, hovered);
         let fill = if active { p.accent_soft } else { theme::mix(Color32::TRANSPARENT, p.surface_hi, t) };
         ui.painter().rect_filled(rect, 10.0, fill);
-        if active {
-            let bar = egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 12.0), egui::vec2(3.0, rect.height() - 24.0));
-            ui.painter().rect_filled(bar, 2.0, p.accent);
-        }
 
         let c = &self.convs[i];
-        let title_color = if active { p.text } else { theme::mix(p.weak, p.text, 0.55 + 0.45 * t) };
-        let title_font = if active { egui::FontId::new(14.0, theme::bold()) } else { egui::FontId::proportional(14.0) };
-        let right_space = if hovered { 34.0 } else { 8.0 };
-        let max_w = rect.width() - 14.0 - right_space;
-        // cut long titles with "…" so they fit next to the delete button
-        let mut text = c.title();
-        let mut title = ui.painter().layout(text.clone(), title_font.clone(), title_color, f32::INFINITY);
-        while title.size().x > max_w && !text.is_empty() {
-            text.pop();
-            title = ui.painter().layout(format!("{}…", text.trim_end()), title_font.clone(), title_color, f32::INFINITY);
-        }
-        ui.painter().galley(rect.left_top() + egui::vec2(12.0, 8.0), title, title_color);
-        let sub = if c.busy { "typing…".to_string() } else if c.error.is_some() { "⚠ not sent".to_string() } else { conversations::when(c.updated) };
-        let sub_color = if c.busy { p.success } else if c.error.is_some() { p.danger } else { p.weak };
-        ui.painter().text(rect.left_top() + egui::vec2(12.0, 29.0), egui::Align2::LEFT_TOP, sub, egui::FontId::proportional(11.5), sub_color);
+        let busy = c.busy;
+        // room for the two icons while hovered
+        let right_space = if hovered && !busy { 64.0 } else { 10.0 };
+        let max_w = rect.width() - 24.0 - right_space;
+        let title_font = egui::FontId::new(13.5, theme::bold());
+        let title_color = if active { p.text } else { theme::mix(theme::mix(p.weak, p.text, 0.7), p.text, t) };
+        let title = fit_end(ui, &c.title(), &title_font, max_w);
+        ui.painter().text(rect.left_top() + egui::vec2(12.0, 9.0), egui::Align2::LEFT_TOP, title, title_font, title_color);
+
+        let (sub, sub_color) = if busy {
+            ("typing…".to_string(), p.success)
+        } else if c.error.is_some() {
+            ("⚠ not sent – open to retry".to_string(), p.danger)
+        } else {
+            let preview = c.preview();
+            (if preview.is_empty() { conversations::when(c.updated) } else { preview }, p.weak)
+        };
+        let sub_font = egui::FontId::proportional(11.5);
+        let sub = fit_end(ui, &sub, &sub_font, max_w);
+        ui.painter().text(rect.left_top() + egui::vec2(12.0, 29.0), egui::Align2::LEFT_TOP, sub, sub_font, sub_color);
 
         let mut action = RowAction::None;
-        if self.confirm_delete.as_deref() == Some(id.as_str()) {
-            // second step of deleting: ask once more inside the row
-            let area = egui::Rect::from_min_max(rect.right_top() - egui::vec2(118.0, -9.0), rect.right_bottom() - egui::vec2(6.0, 9.0));
-            ui.painter().rect_filled(area, 8.0, p.panel);
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)));
-            if child.add(theme::Btn::new(theme::Kind::Ghost, RichText::new("Cancel").small()).min_size(egui::vec2(0.0, 28.0))).clicked() {
-                self.confirm_delete = None;
+        if hovered && !busy {
+            // rename and delete, right-aligned on the row
+            let btn = |ui: &mut egui::Ui, center: egui::Pos2, icon: &str, tip: &str, color: Color32| {
+                let r = egui::Rect::from_center_size(center, egui::vec2(26.0, 26.0));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
+                child
+                    .add(theme::Btn::new(theme::Kind::Ghost, RichText::new(icon).size(13.0).color(color)).min_size(egui::vec2(26.0, 26.0)).rounding(8.0))
+                    .on_hover_text(tip)
+                    .clicked()
+            };
+            let y = rect.center().y;
+            if btn(ui, egui::pos2(rect.right() - 20.0, y), "🗑", "Delete this chat (you can undo it)", p.danger) {
+                return RowAction::Delete(id);
             }
-            let del = theme::Btn::new(theme::Kind::Ghost, RichText::new("Delete").small().color(p.danger)).min_size(egui::vec2(0.0, 28.0));
-            if child.add(del).clicked() {
-                action = RowAction::Delete(id.clone());
-            }
-            return action;
-        }
-        if hovered && !c.busy {
-            let x_rect = egui::Rect::from_center_size(rect.right_center() - egui::vec2(20.0, 0.0), egui::vec2(26.0, 26.0));
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(x_rect));
-            let x = theme::Btn::new(theme::Kind::Ghost, RichText::new("✖").small()).min_size(egui::vec2(26.0, 26.0)).rounding(999.0);
-            if child.add(x).on_hover_text("Delete this chat").clicked() {
-                self.confirm_delete = Some(id.clone());
+            if btn(ui, egui::pos2(rect.right() - 48.0, y), "✏", "Rename", p.weak) {
+                self.renaming = Some((id.clone(), self.convs[i].title()));
                 return RowAction::None;
             }
         }
@@ -765,7 +841,7 @@ impl App {
                 ui.close_menu();
             }
             if ui.add_enabled(!self.convs[i].busy, egui::Button::new("🗑  Delete")).clicked() {
-                self.confirm_delete = Some(id.clone());
+                action = RowAction::Delete(id.clone());
                 ui.close_menu();
             }
         });
@@ -1489,11 +1565,28 @@ impl App {
                         }
                     });
                 });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for (i, label) in ["General", "Free AI models", "GitHub", "Advanced"].into_iter().enumerate() {
+                        let on = self.settings_tab == i;
+                        let kind = if on { theme::Kind::Secondary } else { theme::Kind::Ghost };
+                        let text = RichText::new(label).color(if on { p.text } else { p.weak });
+                        let text = if on { text.family(theme::bold()) } else { text };
+                        if ui.add(theme::Btn::new(kind, text).min_size(egui::vec2(0.0, 32.0)).rounding(999.0)).clicked() {
+                            self.settings_tab = i;
+                        }
+                    }
+                });
                 ui.add_space(6.0);
+                let tab = self.settings_tab;
                 // the contents scroll when the window is too small for them
-                let max_h = (ctx.screen_rect().height() - 190.0).max(200.0);
-                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
-
+                let max_h = (ctx.screen_rect().height() - 230.0).clamp(200.0, 460.0);
+                egui::ScrollArea::vertical().id_salt(("settings", tab)).max_height(max_h).show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    // same height on every tab, so the tabs do not jump around
+                    ui.set_min_height(max_h);
+                    if tab == 0 {
                     section(ui, p, |ui| {
                         ui.label(RichText::new("Invite link").family(theme::bold()).color(p.text));
                         ui.label(RichText::new("Paste the link of the shared chat. Everything else is set up automatically.").small().color(p.weak));
@@ -1592,14 +1685,17 @@ impl App {
                         });
                     });
 
+                    }
+                    if tab == 1 {
+                        section(ui, p, |ui| self.models_settings(ui, p));
+                    }
+                    if tab == 2 {
+                        section(ui, p, |ui| self.github_settings(ui, p));
+                    }
+                    if tab == 3 {
+                    ui.label(RichText::new("Only needed if something does not work – Connect normally fills these in.").small().color(p.weak));
                     ui.add_space(8.0);
-                    section(ui, p, |ui| self.models_settings(ui, p));
-
-                    ui.add_space(8.0);
-                    section(ui, p, |ui| self.github_settings(ui, p));
-
-                    ui.add_space(8.0);
-                    egui::CollapsingHeader::new(RichText::new("Advanced (only needed if something does not work)").color(p.weak)).show(ui, |ui| {
+                    section(ui, p, |ui| {
                         egui::Grid::new("adv").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                             let auto_upload = {
                                 let mut d = self.draft.clone();
@@ -1664,6 +1760,7 @@ impl App {
                         ui.add_space(4.0);
                         ui.label(RichText::new(format!("Settings file: {}", Settings::path_display())).small().color(p.weak));
                     });
+                    }
                 });
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
@@ -1893,7 +1990,7 @@ impl App {
             ui.add(egui::Label::new(RichText::new(note).small().color(c)).wrap());
         }
         ui.label(
-            RichText::new("This key is only for the AI models. The GitHub token below is only for your repository.")
+            RichText::new("This key is only for the AI models. The GitHub token (GitHub tab) is only for your repository.")
                 .small()
                 .color(p.weak),
         );
@@ -1911,7 +2008,9 @@ impl App {
         if !has_selection || self.show_settings {
             self.selection_anchor = None;
         } else if released || (self.selection_anchor.is_none() && !down) {
-            if let Some(p) = pos {
+            // a plain click also leaves an (empty) selection behind: only a real drag counts
+            let dragged = matches!((origin, pos), (Some(o), Some(p)) if o.distance(p) > 4.0);
+            if let (Some(p), true) = (pos, dragged) {
                 let downwards = origin.map(|o| p.y >= o.y - 4.0).unwrap_or(true);
                 self.selection_anchor = Some((p, downwards));
             }
@@ -2337,8 +2436,8 @@ fn menu_row(ui: &mut egui::Ui, p: theme::Palette, selected: bool, icon: &str, ti
     let room = right - left - 4.0;
     let title_font = egui::FontId::new(14.0, theme::bold());
     let sub_font = egui::FontId::proportional(11.5);
-    let title = fit_text(ui, title, &title_font, room);
-    let sub = fit_text(ui, sub, &sub_font, room);
+    let title = fit_end(ui, title, &title_font, room);
+    let sub = fit_end(ui, sub, &sub_font, room);
     let painter = ui.painter();
     painter.text(egui::pos2(left, rect.top() + 7.0), egui::Align2::LEFT_TOP, title, title_font, p.text);
     painter.text(egui::pos2(left, rect.top() + 26.0), egui::Align2::LEFT_TOP, sub, sub_font, p.weak);
@@ -2443,6 +2542,26 @@ fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
 
 /// `text` shortened with "…" (in the middle, so the file extension stays visible) until it is
 /// at most `max` pixels wide.
+/// Like `fit_text`, but cuts at the end – for sentences (titles, previews).
+fn fit_end(ui: &egui::Ui, text: &str, font: &egui::FontId, max: f32) -> String {
+    if text_width(ui, text, font) <= max {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut lo, mut hi) = (0, chars.len());
+    // the longest start that still fits with "…"
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let s: String = chars[..mid].iter().collect::<String>().trim_end().to_string() + "…";
+        if text_width(ui, &s, font) <= max {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    chars[..lo].iter().collect::<String>().trim_end().to_string() + "…"
+}
+
 fn fit_text(ui: &egui::Ui, text: &str, font: &egui::FontId, max: f32) -> String {
     if text_width(ui, text, font) <= max {
         return text.to_string();
@@ -2543,6 +2662,7 @@ impl eframe::App for App {
         self.chat(ctx);
         self.settings_window(ctx);
         self.repo_picker_window(ctx);
+        self.undo_toast(ctx);
         self.reply_to_selection(ctx);
 
         if self.busy || self.pending.iter().any(|f| matches!(f.state, FileState::Uploading)) {
