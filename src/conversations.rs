@@ -106,7 +106,7 @@ impl Conversation {
             Some(l) => l.to_string(),
             None => match first.and_then(|m| m.attachments.first()) {
                 Some(a) => a.name.clone(),
-                None => "New chat".to_string(),
+                None => crate::i18n::t("New chat").to_string(),
             },
         }
     }
@@ -249,7 +249,7 @@ pub fn when(unix: i64) -> String {
     if day == today {
         t.format("%H:%M").to_string()
     } else if today.pred_opt() == Some(day) {
-        "Yesterday".to_string()
+        crate::i18n::t("Yesterday").to_string()
     } else {
         t.format("%d.%m.%Y").to_string()
     }

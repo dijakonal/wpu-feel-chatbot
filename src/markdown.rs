@@ -3,6 +3,7 @@
 //! rules and fenced code blocks with a **Copy** button.
 
 use eframe::egui::{self, FontId, RichText, TextStyle, Ui};
+use crate::i18n::{t, tf};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -491,15 +492,15 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str, push: Option<PushState>) -> b
         .show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            ui.label(RichText::new(if lang.is_empty() { "code" } else { lang }).small().color(p.weak));
+            ui.label(RichText::new(if lang.is_empty() { t("code") } else { lang }).small().color(p.weak));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let id = ui.id().with("copied");
                 let copied_at: Option<f64> = ui.data(|d| d.get_temp(id));
                 let now = ui.input(|i| i.time);
                 let recently = copied_at.map(|t| now - t < 1.5).unwrap_or(false);
-                let label = if recently { "✔ Copied" } else { "📋 Copy" };
+                let label = if recently { format!("✔ {}", t("Copied")) } else { format!("📋 {}", t("Copy")) };
                 let b = crate::theme::Btn::new(crate::theme::Kind::Ghost, RichText::new(label).small());
-                if ui.add(b).on_hover_text("Copy this code to the clipboard").clicked() {
+                if ui.add(b).on_hover_text(t("Copy this code to the clipboard")).clicked() {
                     ui.ctx().copy_text(code.to_string());
                     ui.data_mut(|d| d.insert_temp(id, now));
                 }
@@ -510,23 +511,23 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str, push: Option<PushState>) -> b
                     let ghost = |text: RichText| crate::theme::Btn::new(crate::theme::Kind::Ghost, text.small());
                     match state {
                         PushState::Idle => {
-                            if ui.add(ghost(RichText::new("⬆ GitHub"))).on_hover_text("Save this code to your GitHub repository as the file the answer names (an existing file is merged with it, not overwritten)").clicked() {
+                            if ui.add(ghost(RichText::new("⬆ GitHub"))).on_hover_text(t("Save this code to your GitHub repository as the file named in the answer")).clicked() {
                                 push_clicked = true;
                             }
                         }
                         PushState::Pushing => {
-                            ui.label(RichText::new("Saving…").small().color(p.weak)).on_hover_text("Merging with the file on GitHub and saving");
+                            ui.label(RichText::new(t("Saving…")).small().color(p.weak)).on_hover_text(t("Merging with the file on GitHub and saving"));
                             ui.add(egui::Spinner::new().size(12.0));
                         }
                         PushState::Done(url) => {
-                            let r = ui.add(ghost(RichText::new("✔ On GitHub").color(p.success)));
-                            if r.on_hover_text(format!("Saved to GitHub – click to open the commit:\n{url}")).clicked() {
+                            let r = ui.add(ghost(RichText::new(format!("✔ {}", t("On GitHub"))).color(p.success)));
+                            if r.on_hover_text(tf("Saved to GitHub – click to open the commit:\n{0}", &[url])).clicked() {
                                 ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                             }
                         }
                         PushState::Failed(e) => {
-                            let r = ui.add(ghost(RichText::new("⚠ Retry GitHub").color(p.danger)));
-                            if r.on_hover_text(format!("Pushing failed: {e}\nClick to try again")).clicked() {
+                            let r = ui.add(ghost(RichText::new(format!("⚠ {}", t("Retry GitHub"))).color(p.danger)));
+                            if r.on_hover_text(tf("Pushing failed: {0}\nClick to try again", &[e])).clicked() {
                                 push_clicked = true;
                             }
                         }

@@ -5,10 +5,19 @@
 - **Pick up where you left off:** the app opens on your last chat. A new chat
   shows a **Continue where you left off** button and your **recent chats** (with
   a preview of the last message) above the suggestions.
+- **Menus in your language:** the whole window – buttons, settings, hints – is
+  translated into German, English, French, Spanish, Italian, Dutch, Polish,
+  Turkish, Ukrainian and Russian. *Settings → Language* sets the menus, the chat
+  names and the bot's answers together; *Automatic* uses the system's language for
+  the menus.
+- **Answers in the right language:** the class bot's instructions are German, so
+  it sometimes answered English questions in German. The app now tells it to answer
+  in the language you write in (or the one you picked), and repeats a chosen
+  language after your message.
 - **Chat names sum up the chat:** after the first message the bot writes a short
   title for it (e.g. "Fibonacci numbers in Python") instead of showing the start
-  of the message, in the chosen answer language (with *Automatic*: the language of
-  the message). Changing the language renames the chats to match. Chats from the
+  of the message, in the language of the menus. Changing the language renames the
+  chats to match. Chats from the
   last week get a title too. Renaming a chat yourself still wins.
 - **Tidier chat list:** chats are grouped under *Today*, *Yesterday*, *Last 7 days*
   and *Older*, and each shows the start of its last message. Hovering a chat shows

@@ -15,6 +15,7 @@ mod models;
 mod secret;
 mod settings;
 mod theme;
+mod ui_text;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {

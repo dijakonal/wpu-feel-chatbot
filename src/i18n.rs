@@ -1,5 +1,39 @@
 //! The start screen in the chosen answer language: the bot's greeting and the suggestion cards.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::ui_text::{COLUMNS, TEXTS};
+
+/// Column of [`TEXTS`] the menus are shown in (0 = English).
+static UI_COLUMN: AtomicUsize = AtomicUsize::new(0);
+
+/// Show the menus in `code` (a code from `LANGUAGES`; unknown codes mean English).
+pub fn set_ui_language(code: &str) {
+    UI_COLUMN.store(COLUMNS.iter().position(|c| *c == code).unwrap_or(0), Ordering::Relaxed);
+}
+
+/// A menu text in the current language; `english` is the text itself and the key.
+/// Texts without a translation stay English.
+pub fn t(english: &'static str) -> &'static str {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static INDEX: OnceLock<HashMap<&'static str, usize>> = OnceLock::new();
+    let index = INDEX.get_or_init(|| TEXTS.iter().enumerate().map(|(i, row)| (row[0], i)).collect());
+    match index.get(english) {
+        Some(&row) => TEXTS[row][UI_COLUMN.load(Ordering::Relaxed)],
+        None => english,
+    }
+}
+
+/// [`t`] with `{0}`, `{1}`, … filled in.
+pub fn tf(english: &'static str, args: &[&str]) -> String {
+    let mut out = t(english).to_string();
+    for (i, a) in args.iter().enumerate() {
+        out = out.replace(&format!("{{{i}}}"), a);
+    }
+    out
+}
+
 /// The class bot's greeting as AIS.chat sends it.
 pub const CLASS_GREETING: &str = "Hallo, wie kann ich Dir beim Coden helfen?";
 
@@ -111,6 +145,46 @@ pub fn clean_translation(reply: &str, original: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_texts_are_complete() {
+        let mut seen = std::collections::HashSet::new();
+        for row in TEXTS {
+            assert!(seen.insert(row[0]), "listed twice: {}", row[0]);
+            let holes = (0..4).filter(|i| row[0].contains(&format!("{{{i}}}"))).count();
+            for (col, text) in row.iter().enumerate() {
+                assert!(!text.trim().is_empty(), "{} has no {}", row[0], COLUMNS[col]);
+                let n = (0..4).filter(|i| text.contains(&format!("{{{i}}}"))).count();
+                assert_eq!(n, holes, "placeholders of {:?} in {}", row[0], COLUMNS[col]);
+            }
+        }
+        // every text the code asks for is in the table
+        for file in [include_str!("app.rs"), include_str!("markdown.rs"), include_str!("conversations.rs")] {
+            for call in ["t(\"", "tf(\""] {
+                let mut rest = file;
+                while let Some(at) = rest.find(call) {
+                    let before = rest[..at].chars().last().unwrap_or(' ');
+                    let after = &rest[at + call.len()..];
+                    rest = after;
+                    if before.is_alphanumeric() || before == '_' {
+                        continue; // e.g. print(" or insert("
+                    }
+                    let key = after.split('"').next().unwrap().replace("\\n", "\n");
+                    assert!(TEXTS.iter().any(|r| r[0] == key), "no translations for {key:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn translates_and_fills_in() {
+        set_ui_language("de");
+        assert_eq!(t("New chat"), "Neuer Chat");
+        assert_eq!(tf("Free via {0}", &["Groq"]), "Kostenlos über Groq");
+        assert_eq!(t("not in the table"), "not in the table");
+        set_ui_language("xx");
+        assert_eq!(t("New chat"), "New chat");
+    }
     use crate::settings::LANGUAGES;
 
     #[test]

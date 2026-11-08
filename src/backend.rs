@@ -27,6 +27,7 @@ pub fn system_prompt(s: &Settings) -> String {
 pub fn openai_messages(s: &Settings, msgs: &[ChatMessage]) -> Vec<(String, String)> {
     let last_user = msgs.iter().rposition(|m| m.role == Role::User);
     let note = s.app_note();
+    let reminder = s.language_reminder();
     let mut out = vec![("system".to_string(), system_prompt(s))];
     for (i, m) in msgs.iter().enumerate() {
         let role = match m.role {
@@ -40,8 +41,8 @@ pub fn openai_messages(s: &Settings, msgs: &[ChatMessage]) -> Vec<(String, Strin
         if !uploaded.is_empty() {
             content.push_str(&format!("\n\n[Files attached in the class chat, not available here: {}]", uploaded.join(", ")));
         }
-        if let (Some(n), true) = (&note, Some(i) == last_user) {
-            content = format!("{n}\n\n{content}");
+        if Some(i) == last_user {
+            content = ais::with_note(&content, &note, &reminder);
         }
         if role == "assistant" && content.trim().is_empty() {
             continue;
@@ -66,7 +67,7 @@ pub fn stream(s: &Settings, msgs: &[ChatMessage], session: &str, mut on_event: i
 /// answer-language and GitHub notes. Returns the whole answer.
 pub fn ask(s: &Settings, question: &str) -> Result<String> {
     let mut plain = s.clone();
-    plain.language.clear();
+    plain.plain_request = true;
     plain.github_enabled = false;
     let msgs = vec![ChatMessage::user(question)];
     let mut reply = String::new();
@@ -100,6 +101,8 @@ mod tests {
         assert_eq!(out[1], ("assistant".to_string(), "Hallo!".to_string()));
         assert!(out[2].1.contains("not available here: aufgabe.pdf"));
         assert_eq!(out.len(), 4, "the empty answer is left out");
-        assert!(out[3].1.starts_with("[Note from the chat app") && out[3].1.ends_with("And now?"));
+        assert!(out[3].1.starts_with("[Note from the chat app") && out[3].1.ends_with("And now?\n\n[Reply in English.]"));
+        s.plain_request = true;
+        assert_eq!(openai_messages(&s, &msgs)[3].1, "And now?", "one-off questions carry no note");
     }
 }

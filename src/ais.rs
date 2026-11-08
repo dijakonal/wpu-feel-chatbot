@@ -155,6 +155,7 @@ pub fn build_body(s: &Settings, msgs: &[ChatMessage], session_id: &str) -> Strin
     // chat, so changing the language takes effect with the next message.
     let last_user = msgs.iter().rposition(|m| m.role == Role::User);
     let note = s.app_note();
+    let reminder = s.language_reminder();
     let messages: Vec<Value> = msgs
         .iter()
         .enumerate()
@@ -168,10 +169,7 @@ pub fn build_body(s: &Settings, msgs: &[ChatMessage], session_id: &str) -> Strin
             (Role::User, _) => json!({
                 "id": m.id,
                 "role": "user",
-                "content": esc(&match (&note, Some(i) == last_user) {
-                    (Some(n), true) => format!("{n}\n\n{}", m.content),
-                    _ => m.content.clone(),
-                }),
+                "content": esc(&if Some(i) == last_user { with_note(&m.content, &note, &reminder) } else { m.content.clone() }),
                 "createdAt": format!("$D{}", m.created_at),
             }),
             (Role::Assistant, false) => json!({
@@ -204,6 +202,21 @@ pub fn build_body(s: &Settings, msgs: &[ChatMessage], session_id: &str) -> Strin
         "sharedSessionId": session_id,
     }]);
     body.to_string()
+}
+
+/// The newest message with the app's hidden note in front and the language reminder after it.
+pub fn with_note(content: &str, note: &Option<String>, reminder: &Option<String>) -> String {
+    let mut out = String::new();
+    if let Some(n) = note {
+        out.push_str(n);
+        out.push_str("\n\n");
+    }
+    out.push_str(content);
+    if let Some(r) = reminder {
+        out.push_str("\n\n");
+        out.push_str(r);
+    }
+    out
 }
 
 fn router_state_tree(character_id: &str) -> String {
@@ -854,6 +867,7 @@ mod tests {
         let s = Settings {
             character_id: "cid".into(),
             invite_code: "code".into(),
+            plain_request: true,
             ..Default::default()
         };
         let msgs = vec![ChatMessage::greeting("Hi"), ChatMessage::user("$5 please")];
@@ -876,7 +890,8 @@ mod tests {
             ChatMessage::user("$second"),
         ];
         let v: Value = serde_json::from_str(&build_body(&s, &msgs, "sess")).unwrap();
-        assert_eq!(v[0]["messages"][3]["content"], "$$second", "automatic: unchanged");
+        let last = v[0]["messages"][3]["content"].as_str().unwrap();
+        assert!(last.contains("the language the message below is written in") && last.ends_with("\n\n$second"), "automatic: {last}");
 
         s.language = "en".into();
         let v: Value = serde_json::from_str(&build_body(&s, &msgs, "sess")).unwrap();
@@ -884,7 +899,7 @@ mod tests {
         let last = v[0]["messages"][3]["content"].as_str().unwrap();
         assert!(last.starts_with("[Note from the chat app"), "{last}");
         assert!(last.contains("English (English)"));
-        assert!(last.ends_with("\n\n$second"));
+        assert!(last.ends_with("\n\n$second\n\n[Reply in English.]"), "{last}");
         assert_eq!(msgs[3].content, "$second", "the stored chat stays clean");
     }
 

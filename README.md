@@ -40,11 +40,14 @@ To build it yourself, see [Build & run](#build--run).
    **↩ Reply** button that appears next to it. The quote shows above the message
    box (✖ or Esc removes it) and above your message in the chat; the bot gets it
    as a Markdown quote (`> …`) in front of your question.
-5. **⚙ Settings → Answer language** makes the bot always answer in one language
-   (Deutsch, English, Français, Español, …), whatever language you write in.
-   The app puts a short note in front of your newest message in the request –
-   it is not shown in the window and not kept in the chat history, so a change
-   applies from the next message on. *Automatic* sends no note.
+5. **⚙ Settings → Language** sets the language of the menus, the chat names and
+   the bot's answers (Deutsch, English, Français, Español, Italiano, Nederlands,
+   Polski, Türkçe, Українська, Русский). The bot then always answers in that
+   language, whatever language you write in. The app puts a short note in front of
+   your newest message in the request (and repeats the language after it) – it is
+   not shown in the window and not kept in the chat history, so a change applies
+   from the next message on. With *Automatic* the menus use your system's language
+   and the bot answers in the language you write in.
    The start screen follows the language too: the bot's greeting and the
    suggestion cards switch to it in chats that have not started yet. The class
    bot's greeting is translated by the app itself; for other bots the app asks
@@ -257,7 +260,8 @@ Without a tag push: on GitHub open **Actions → Build → Run workflow**, tick
 | `src/ais.rs` | the AIS.chat protocol: request body, streamed-answer decoder, file upload, auto-detection |
 | `src/conversations.rs` | one chat's state, titles, saving/loading the chat list |
 | `src/github.rs` | optional GitHub saving: file names, one commit per push (GitHub REST API) |
-| `src/i18n.rs` | greeting and suggestion cards in the answer language |
+| `src/i18n.rs` | menu language, greeting and suggestion cards |
+| `src/ui_text.rs` | the translations of every menu text |
 | `src/backend.rs` | sends requests to AIS.chat or to a free AI model |
 | `src/models.rs` | free AI providers (OpenAI-style API): model lists, streaming chat |
 | `src/settings.rs` | invite-link parsing, cURL import, loading/saving settings |

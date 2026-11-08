@@ -12,6 +12,7 @@ use eframe::egui::{self, Align, Color32, Key, Layout, Modifiers, RichText, Round
 
 use crate::ais::{self, Attachment, AttachmentData, ChatMessage, Event, Role};
 use crate::conversations::{self, Conversation, FileState, PendingFile};
+use crate::i18n::{t, tf};
 use crate::github;
 use crate::markdown::{self, PushState};
 use crate::theme;
@@ -204,7 +205,7 @@ impl App {
         let size = bytes.len();
 
         if size > ais::MAX_UPLOAD_BYTES {
-            let msg = format!("too large (max {} MB)", ais::MAX_UPLOAD_BYTES / 1024 / 1024);
+            let msg = tf("too large (max {0} MB)", &[&(ais::MAX_UPLOAD_BYTES / 1024 / 1024).to_string()]);
             self.pending.push(PendingFile { id, name, size, state: FileState::Failed(msg) });
             return;
         }
@@ -217,7 +218,7 @@ impl App {
         }
         // the free models only read text: PDFs, images and Office files need the class bot's upload
         if self.settings.uses_ai_models() {
-            let msg = "only text and code files work with the free models – switch to the class bot for this file".to_string();
+            let msg = t("only text and code files work with the free models – switch to the class bot for this file").to_string();
             self.pending.push(PendingFile { id, name, size, state: FileState::Failed(msg) });
             return;
         }
@@ -236,7 +237,7 @@ impl App {
     }
 
     fn pick_files(&mut self) {
-        if let Some(paths) = rfd::FileDialog::new().set_title("Attach files").pick_files() {
+        if let Some(paths) = rfd::FileDialog::new().set_title(t("Attach files")).pick_files() {
             for p in paths {
                 self.add_path(&p);
             }
@@ -250,7 +251,7 @@ impl App {
             Err(e) => {
                 let id = self.next_file_id;
                 self.next_file_id += 1;
-                self.pending.push(PendingFile { id, name, size: 0, state: FileState::Failed(format!("could not read: {e}")) });
+                self.pending.push(PendingFile { id, name, size: 0, state: FileState::Failed(tf("could not read: {0}", &[&e.to_string()])) });
             }
         }
     }
@@ -370,8 +371,8 @@ impl App {
         if self.summarising.is_some() || !can_ask {
             return;
         }
-        // titles follow the answer language; with "Automatic" they use the message's language
-        let lang = self.settings.language.trim().to_string();
+        // titles are part of the menus: they follow the menu language
+        let lang = self.settings.ui_language();
         let english = crate::settings::language(&lang).map(|(_, e)| e.to_string());
         let week_ago = conversations::now() - 7 * 24 * 3600;
         let wanted = |c: &Conversation| !self.summary_failed.contains(&format!("{}:{lang}", c.id)) && c.needs_summary(&lang).is_some();
@@ -465,12 +466,12 @@ impl App {
                         ui.set_max_width((screen.width() - 80.0).min(460.0));
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("🗑").color(p.weak));
-                            let text = fit_end(ui, &format!("Deleted “{title}”"), &egui::TextStyle::Body.resolve(ui.style()), 260.0);
+                            let text = fit_end(ui, &tf("Deleted “{0}”", &[&title]), &egui::TextStyle::Body.resolve(ui.style()), 260.0);
                             ui.label(RichText::new(text).color(p.text));
-                            if ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new("Undo").family(theme::bold())).min_size(egui::vec2(0.0, 30.0))).clicked() {
+                            if ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(t("Undo")).family(theme::bold())).min_size(egui::vec2(0.0, 30.0))).clicked() {
                                 undo = true;
                             }
-                            if theme::ghost_button(ui, "✖").on_hover_text("Dismiss").clicked() {
+                            if theme::ghost_button(ui, "✖").on_hover_text(t("Dismiss")).clicked() {
                                 dismiss = true;
                             }
                         });
@@ -599,11 +600,11 @@ impl App {
                         Ok(models) => {
                             self.models = models;
                             if self.models_note.as_ref().map(|(ok, _)| *ok).unwrap_or(false) {
-                                self.models_note = Some((true, format!("Ready: {} models – pick one in the list at the top.", self.models.len())));
+                                self.models_note = Some((true, tf("Ready: {0} models – pick one in the list at the top.", &[&self.models.len().to_string()])));
                             }
                         }
                         // the suggested models stay; sending tells what is wrong if it matters
-                        Err(e) => self.models_note = Some((false, format!("Could not read the model list: {e}"))),
+                        Err(e) => self.models_note = Some((false, tf("Could not read the model list: {0}", &[&e]))),
                     }
                 }
                 Msg::GreetingTranslated { lang, source, text } => {
@@ -698,7 +699,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let menu = ui.add(theme::Btn::new(theme::Kind::Ghost, RichText::new("☰").size(18.0)).min_size(egui::vec2(34.0, 34.0)));
-                    let tip = if self.show_sidebar { "Hide the chat list" } else { "Show the chat list" };
+                    let tip = if self.show_sidebar { t("Hide the chat list") } else { t("Show the chat list") };
                     if menu.on_hover_text(tip).clicked() {
                         self.show_sidebar = !self.show_sidebar;
                     }
@@ -711,11 +712,11 @@ impl App {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             let github = self.settings.uses_ai_models();
                             let (color, text) = match &self.conn {
-                                _ if self.busy => (p.success, "typing…".to_string()),
-                                _ if github => (p.success, format!("via {}", self.settings.ai_provider().name)),
-                                Conn::Ready => (p.success, "Online".to_string()),
-                                Conn::Connecting => (p.warning, "Connecting…".to_string()),
-                                Conn::Problem(_) => (p.danger, "Offline".to_string()),
+                                _ if self.busy => (p.success, t("typing…").to_string()),
+                                _ if github => (p.success, tf("via {0}", &[self.settings.ai_provider().name])),
+                                Conn::Ready => (p.success, t("Online").to_string()),
+                                Conn::Connecting => (p.warning, t("Connecting…").to_string()),
+                                Conn::Problem(_) => (p.danger, t("Offline").to_string()),
                             };
                             theme::dot(ui, color);
                             let r = ui.label(RichText::new(text).small().color(p.weak));
@@ -726,16 +727,16 @@ impl App {
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let gear = ui.add(theme::Btn::new(theme::Kind::Ghost, RichText::new("⚙").size(18.0)).min_size(egui::vec2(34.0, 34.0)));
-                        if gear.on_hover_text("Settings").clicked() {
+                        if gear.on_hover_text(t("Settings")).clicked() {
                             self.open_settings();
                         }
                         let new_chat = ui.add(
-                            theme::Btn::new(theme::Kind::Secondary, "➕  New chat")
+                            theme::Btn::new(theme::Kind::Secondary, format!("➕  {}", t("New chat")))
                                 .rounding(999.0)
                                 .min_size(egui::vec2(0.0, 32.0))
                                 .enabled(!self.chat_is_empty()),
                         );
-                        if new_chat.on_hover_text("Start a new chat (this one stays in the list)").clicked() {
+                        if new_chat.on_hover_text(t("Start a new chat (this one stays in the list)")).clicked() {
                             self.new_chat();
                         }
                         ui.add_space(4.0);
@@ -758,8 +759,8 @@ impl App {
             .frame(egui::Frame::none().fill(p.panel).stroke(Stroke::new(1.0_f32, p.border)).inner_margin(egui::Margin::symmetric(10.0, 12.0)))
             .show(ctx, |ui| {
                 let w = ui.available_width();
-                let new = ui.add(theme::Btn::new(theme::Kind::Secondary, "➕  New chat").min_size(egui::vec2(w, 36.0)).enabled(!self.chat_is_empty()));
-                if new.on_hover_text("Start a new chat (this one stays in the list)").clicked() {
+                let new = ui.add(theme::Btn::new(theme::Kind::Secondary, format!("➕  {}", t("New chat"))).min_size(egui::vec2(w, 36.0)).enabled(!self.chat_is_empty()));
+                if new.on_hover_text(t("Start a new chat (this one stays in the list)")).clicked() {
                     self.new_chat();
                 }
                 ui.add_space(6.0);
@@ -784,7 +785,7 @@ impl App {
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
                                 ui.add_space(8.0);
-                                ui.label(RichText::new(g.to_uppercase()).size(10.5).family(theme::bold()).color(p.weak));
+                                ui.label(RichText::new(t(g).to_uppercase()).size(10.5).family(theme::bold()).color(p.weak));
                             });
                             ui.add_space(2.0);
                         }
@@ -817,7 +818,7 @@ impl App {
                     egui::TextEdit::singleline(text)
                         .desired_width(w)
                         .margin(egui::Margin::symmetric(10.0, 12.0))
-                        .hint_text("Name of the chat"),
+                        .hint_text(t("Name of the chat")),
                 );
                 r.request_focus();
                 let done = r.lost_focus() || ui.input(|i| i.key_pressed(Key::Enter));
@@ -830,15 +831,15 @@ impl App {
                     self.renaming = None;
                     self.save_chats();
                 }
-                ui.label(RichText::new("Enter to save · Esc to cancel").size(10.5).color(p.weak));
+                ui.label(RichText::new(t("Enter to save · Esc to cancel")).size(10.5).color(p.weak));
                 return RowAction::None;
             }
         }
 
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 52.0), egui::Sense::click());
         let hovered = ui.rect_contains_pointer(rect);
-        let t = theme::hover_anim(ui, row_id, hovered);
-        let fill = if active { p.accent_soft } else { theme::mix(Color32::TRANSPARENT, p.surface_hi, t) };
+        let hov = theme::hover_anim(ui, row_id, hovered);
+        let fill = if active { p.accent_soft } else { theme::mix(Color32::TRANSPARENT, p.surface_hi, hov) };
         ui.painter().rect_filled(rect, 10.0, fill);
 
         let c = &self.convs[i];
@@ -847,14 +848,14 @@ impl App {
         let right_space = if hovered && !busy { 64.0 } else { 10.0 };
         let max_w = rect.width() - 24.0 - right_space;
         let title_font = egui::FontId::new(13.5, theme::bold());
-        let title_color = if active { p.text } else { theme::mix(theme::mix(p.weak, p.text, 0.7), p.text, t) };
+        let title_color = if active { p.text } else { theme::mix(theme::mix(p.weak, p.text, 0.7), p.text, hov) };
         let title = fit_end(ui, &c.title(), &title_font, max_w);
         ui.painter().text(rect.left_top() + egui::vec2(12.0, 9.0), egui::Align2::LEFT_TOP, title, title_font, title_color);
 
         let (sub, sub_color) = if busy {
-            ("typing…".to_string(), p.success)
+            (t("typing…").to_string(), p.success)
         } else if c.error.is_some() {
-            ("⚠ not sent – open to retry".to_string(), p.danger)
+            (t("⚠ not sent – open to retry").to_string(), p.danger)
         } else {
             let preview = c.preview();
             (if preview.is_empty() { conversations::when(c.updated) } else { preview }, p.weak)
@@ -875,10 +876,10 @@ impl App {
                     .clicked()
             };
             let y = rect.center().y;
-            if btn(ui, egui::pos2(rect.right() - 20.0, y), "🗑", "Delete this chat (you can undo it)", p.danger) {
+            if btn(ui, egui::pos2(rect.right() - 20.0, y), "🗑", t("Delete this chat (you can undo it)"), p.danger) {
                 return RowAction::Delete(id);
             }
-            if btn(ui, egui::pos2(rect.right() - 48.0, y), "✏", "Rename", p.weak) {
+            if btn(ui, egui::pos2(rect.right() - 48.0, y), "✏", t("Rename"), p.weak) {
                 self.renaming = Some((id.clone(), self.convs[i].title()));
                 return RowAction::None;
             }
@@ -889,11 +890,11 @@ impl App {
             action = RowAction::Open(id.clone());
         }
         resp.context_menu(|ui| {
-            if ui.button("✏  Rename").clicked() {
+            if ui.button(format!("✏  {}", t("Rename"))).clicked() {
                 self.renaming = Some((id.clone(), self.convs[i].title()));
                 ui.close_menu();
             }
-            if ui.add_enabled(!self.convs[i].busy, egui::Button::new("🗑  Delete")).clicked() {
+            if ui.add_enabled(!self.convs[i].busy, egui::Button::new(format!("🗑  {}", t("Delete")))).clicked() {
                 action = RowAction::Delete(id.clone());
                 ui.close_menu();
             }
@@ -1018,12 +1019,12 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(RichText::new("Attach from GitHub").family(theme::bold()).size(20.0).color(p.text));
+                        ui.label(RichText::new(t("Attach from GitHub")).family(theme::bold()).size(20.0).color(p.text));
                         let branch = if picker.branch.is_empty() { String::new() } else { format!(" · {}", picker.branch) };
                         ui.label(RichText::new(format!("{repo}{branch}")).small().color(p.weak));
                     });
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        if theme::ghost_button(ui, "✖").on_hover_text("Close").clicked() {
+                        if theme::ghost_button(ui, "✖").on_hover_text(t("Close")).clicked() {
                             close = true;
                         }
                     });
@@ -1033,7 +1034,7 @@ impl App {
                 if picker.loading {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(16.0));
-                        ui.label(RichText::new("Reading the file list…").color(p.weak));
+                        ui.label(RichText::new(t("Reading the file list…")).color(p.weak));
                     });
                     return;
                 }
@@ -1042,14 +1043,14 @@ impl App {
                     return;
                 }
                 ui.label(
-                    RichText::new("The app reads the chosen files and attaches them to your message, so the bot can see the code.")
+                    RichText::new(t("The app reads the chosen files and attaches them to your message, so the bot can see the code."))
                         .small()
                         .color(p.weak),
                 );
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut picker.filter).hint_text("🔍 Filter, e.g. .py or src/").desired_width(300.0));
-                    if theme::secondary_button(ui, "Select all code").on_hover_text("All text and code files that fit").clicked() {
+                    ui.add(egui::TextEdit::singleline(&mut picker.filter).hint_text(format!("🔍 {}", t("Filter, e.g. .py or src/"))).desired_width(300.0));
+                    if theme::secondary_button(ui, t("Select all code")).on_hover_text(t("All text and code files that fit")).clicked() {
                         let filter = picker.filter.to_lowercase();
                         let mut total = picker.selected_size();
                         for f in &picker.files {
@@ -1062,7 +1063,7 @@ impl App {
                             }
                         }
                     }
-                    if theme::ghost_button(ui, "Clear").clicked() {
+                    if theme::ghost_button(ui, t("Clear")).clicked() {
                         picker.selected.clear();
                     }
                 });
@@ -1101,13 +1102,13 @@ impl App {
                             }
                         }
                         if shown == 0 {
-                            let text = if picker.files.is_empty() { "The repository has no files yet." } else { "No file matches the filter." };
+                            let text = if picker.files.is_empty() { t("The repository has no files yet.") } else { t("No file matches the filter.") };
                             ui.label(RichText::new(text).color(p.weak));
                         }
                     });
                 });
                 if picker.truncated {
-                    ui.label(RichText::new("The repository is very large – GitHub listed only part of it.").small().color(p.warning));
+                    ui.label(RichText::new(t("The repository is very large – GitHub listed only part of it.")).small().color(p.warning));
                 }
 
                 ui.add_space(6.0);
@@ -1115,15 +1116,15 @@ impl App {
                 let too_big = total > REPO_BUDGET;
                 ui.horizontal(|ui| {
                     let n = picker.selected.len();
-                    let summary = format!("{n} file{} · {} of {}", if n == 1 { "" } else { "s" }, human_size(total), human_size(REPO_BUDGET));
+                    let summary = tf("Files: {0} · {1} of {2}", &[&n.to_string(), &human_size(total), &human_size(REPO_BUDGET)]);
                     ui.label(RichText::new(summary).small().color(if too_big { p.danger } else { p.weak }));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let label = if n == 0 { "Attach".to_string() } else { format!("Attach {n}") };
+                        let label = if n == 0 { t("Attach").to_string() } else { tf("Attach {0}", &[&n.to_string()]) };
                         let b = theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(n > 0 && !too_big);
-                        if ui.add(b).on_disabled_hover_text("Choose files (at most 300 KB in total)").clicked() {
+                        if ui.add(b).on_disabled_hover_text(t("Choose files (at most 300 KB in total)")).clicked() {
                             attach = true;
                         }
-                        if theme::secondary_button(ui, "Cancel").clicked() {
+                        if theme::secondary_button(ui, t("Cancel")).clicked() {
                             close = true;
                         }
                     });
@@ -1156,11 +1157,11 @@ impl App {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(RichText::new("GitHub (optional)").family(theme::bold()).color(p.text));
-                ui.label(RichText::new("Let the bot read your repository and save code to it.").small().color(p.weak));
+                ui.label(RichText::new(t("GitHub (optional)")).family(theme::bold()).color(p.text));
+                ui.label(RichText::new(t("Let the bot read your repository and save code to it.")).small().color(p.weak));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let tip = if enabled { "Switch GitHub off" } else { "Switch GitHub on" };
+                let tip = if enabled { t("Switch GitHub off") } else { t("Switch GitHub on") };
                 theme::toggle(ui, &mut enabled).on_hover_text(tip);
             });
         });
@@ -1176,35 +1177,35 @@ impl App {
         ui.add_space(4.0);
         egui::Grid::new("github").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             let w = 360.0;
-            ui.label("Repository");
+            ui.label(t("Repository"));
             ui.add(egui::TextEdit::singleline(&mut self.draft.github_repo).hint_text("owner/name").desired_width(w));
             ui.end_row();
-            ui.label("Token");
+            ui.label(t("Token"));
             ui.add(egui::TextEdit::singleline(&mut self.draft.github_token).password(true).hint_text("github_pat_…").desired_width(w))
                 .on_hover_text(match self.settings.token_status() {
-                    crate::secret::Status::Stored => "Kept in your system's password store (not in settings.json).",
+                    crate::secret::Status::Stored => t("Kept in your system's password store (not in settings.json)."),
                     crate::secret::Status::Unavailable => "This system has no password store, so the token is kept in settings.json.",
-                    crate::secret::Status::Unknown => "Kept in your system's password store if there is one, otherwise in settings.json.",
+                    crate::secret::Status::Unknown => t("Kept in your system's password store if there is one, otherwise in settings.json."),
                 });
             ui.end_row();
-            ui.label("Branch");
-            ui.add(egui::TextEdit::singleline(&mut self.draft.github_branch).hint_text("default branch").desired_width(w));
+            ui.label(t("Branch"));
+            ui.add(egui::TextEdit::singleline(&mut self.draft.github_branch).hint_text(t("default branch")).desired_width(w));
             ui.end_row();
-            ui.label("Folder");
-            ui.add(egui::TextEdit::singleline(&mut self.draft.github_folder).hint_text("top level").desired_width(w))
-                .on_hover_text("Empty: files go to their own paths in the repository (src/main.rs updates src/main.rs). Enter a folder to put everything inside it.");
+            ui.label(t("Folder"));
+            ui.add(egui::TextEdit::singleline(&mut self.draft.github_folder).hint_text(t("top level")).desired_width(w))
+                .on_hover_text(t("Empty: files go to their own paths in the repository (src/main.rs updates src/main.rs). Enter a folder to put everything inside it."));
             ui.end_row();
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Create a token:").small().color(p.weak));
+            ui.label(RichText::new(t("Create a token:")).small().color(p.weak));
             ui.hyperlink_to(RichText::new("github.com → Fine-grained token").small(), "https://github.com/settings/personal-access-tokens/new")
-                .on_hover_text("Repository access: only this repository · Permissions: Contents → Read and write");
+                .on_hover_text(t("Repository access: only this repository · Permissions: Contents → Read and write"));
         });
         ui.add_space(2.0);
         let mut auto = self.settings.github_auto;
-        ui.radio_value(&mut auto, false, "Only when I click ⬆ GitHub on a code block");
-        ui.radio_value(&mut auto, true, "Automatically: every file an answer contains (named code blocks)").on_hover_text(
-            "Files that already exist are merged with the new code first, so a partial answer does not delete the rest of the file.",
+        ui.radio_value(&mut auto, false, t("Only when I click ⬆ GitHub on a code block"));
+        ui.radio_value(&mut auto, true, t("Automatically: every file an answer contains (named code blocks)")).on_hover_text(
+            t("Files that already exist are merged with the new code first, so a partial answer does not delete the rest of the file."),
         );
         if auto != self.settings.github_auto {
             let mut s = self.settings.clone();
@@ -1214,7 +1215,7 @@ impl App {
         }
         ui.add_space(2.0);
         ui.horizontal(|ui| {
-            let label = if self.github_checking { "Checking…" } else { "Save & check access" };
+            let label = if self.github_checking { t("Checking…") } else { t("Save & check access") };
             let b = ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(!self.github_checking));
             if b.clicked() {
                 let mut s = self.settings.clone();
@@ -1257,11 +1258,11 @@ impl App {
         if let (Conn::Problem(e), false) = (&self.conn, self.settings.uses_ai_models()) {
             let e = e.clone();
             notice(ui, p.danger, |ui| {
-                ui.label(RichText::new(format!("Not connected. {e}")).color(p.text));
-                if theme::secondary_button(ui, "Try again").clicked() {
+                ui.label(RichText::new(format!("{} {e}", t("Not connected."))).color(p.text));
+                if theme::secondary_button(ui, t("Try again")).clicked() {
                     self.start_refresh(false);
                 }
-                if theme::secondary_button(ui, "Settings").clicked() {
+                if theme::secondary_button(ui, t("Settings")).clicked() {
                     self.open_settings();
                 }
             });
@@ -1269,10 +1270,10 @@ impl App {
         if let Some(e) = self.error.clone() {
             notice(ui, p.danger, |ui| {
                 ui.label(RichText::new(e).color(p.text));
-                if theme::secondary_button(ui, "↻ Retry").clicked() {
+                if theme::secondary_button(ui, &format!("↻ {}", t("Retry"))).clicked() {
                     self.retry();
                 }
-                if theme::ghost_button(ui, "✖").on_hover_text("Dismiss").clicked() {
+                if theme::ghost_button(ui, "✖").on_hover_text(t("Dismiss")).clicked() {
                     self.error = None;
                 }
             });
@@ -1315,11 +1316,11 @@ impl App {
                                 ui.vertical(|ui| {
                                     ui.set_width(ui.available_width() - 34.0);
                                     ui.spacing_mut().item_spacing.y = 2.0;
-                                    ui.label(RichText::new("↩ Replying to").small().family(theme::bold()).color(p.accent_hover));
+                                    ui.label(RichText::new(format!("↩ {}", t("Replying to"))).small().family(theme::bold()).color(p.accent_hover));
                                     ui.add(egui::Label::new(RichText::new(short_quote(&q, 220)).small().color(p.weak)).wrap());
                                 });
                                 let x = theme::Btn::new(theme::Kind::Ghost, RichText::new("✖").small()).min_size(egui::vec2(26.0, 26.0)).rounding(999.0);
-                                if ui.add(x).on_hover_text("Don't reply to this (Esc)").clicked() {
+                                if ui.add(x).on_hover_text(t("Don't reply to this (Esc)")).clicked() {
                                     cancel = true;
                                 }
                             });
@@ -1345,8 +1346,8 @@ impl App {
                     let mut open = false;
                     ui.horizontal_wrapped(|ui| {
                         ui.add_space(6.0);
-                        ui.label(RichText::new("💡 The bot cannot open GitHub by itself –").small().color(p.weak));
-                        let b = theme::Btn::new(theme::Kind::Secondary, RichText::new(format!("attach files from {repo}")).small())
+                        ui.label(RichText::new(format!("💡 {}", t("The bot cannot open GitHub by itself –"))).small().color(p.weak));
+                        let b = theme::Btn::new(theme::Kind::Secondary, RichText::new(tf("attach files from {0}", &[&repo])).small())
                             .min_size(egui::vec2(0.0, 26.0))
                             .rounding(999.0);
                         open = ui.add(b).clicked();
@@ -1371,9 +1372,9 @@ impl App {
                             for i in line {
                                 let f = &self.pending[i];
                                 let (icon, note, color) = match &f.state {
-                                    FileState::Uploading => ("", "loading…".to_string(), p.weak),
-                                    FileState::Ready(AttachmentData::Inline(_)) => ("📄", "added as text".to_string(), p.text),
-                                    FileState::Ready(AttachmentData::Uploaded(_)) => ("📎", "uploaded".to_string(), p.text),
+                                    FileState::Uploading => ("", t("loading…").to_string(), p.weak),
+                                    FileState::Ready(AttachmentData::Inline(_)) => ("📄", t("added as text").to_string(), p.text),
+                                    FileState::Ready(AttachmentData::Uploaded(_)) => ("📎", t("uploaded").to_string(), p.text),
                                     FileState::Failed(e) => ("⚠", e.clone(), p.danger),
                                 };
                                 theme::chip_frame(ui).show(ui, |ui| {
@@ -1387,7 +1388,7 @@ impl App {
                                         ui.add(egui::Label::new(RichText::new(&names[i]).color(color)).extend())
                                             .on_hover_text(format!("{} · {} – {note}", f.name, human_size(f.size)));
                                         let x = theme::Btn::new(theme::Kind::Ghost, RichText::new("✖").small()).min_size(egui::vec2(20.0, 20.0)).rounding(999.0);
-                                        if ui.add(x).on_hover_text("Remove").clicked() {
+                                        if ui.add(x).on_hover_text(t("Remove")).clicked() {
                                             remove = Some(f.id);
                                         }
                                     });
@@ -1406,7 +1407,7 @@ impl App {
                     if self.settings.github_ready() {
                         // two sources: this computer or the GitHub repository
                         let menu = ui.make_persistent_id("attach-menu");
-                        let attach = attach.on_hover_text("Attach files from this computer or from GitHub");
+                        let attach = attach.on_hover_text(t("Attach files from this computer or from GitHub"));
                         if attach.clicked() {
                             ui.memory_mut(|m| m.toggle_popup(menu));
                         }
@@ -1423,8 +1424,8 @@ impl App {
                                 let item = |text: String| {
                                     egui::Button::new(text).wrap_mode(egui::TextWrapMode::Extend).min_size(egui::vec2(300.0, 34.0))
                                 };
-                                local = ui.add(item("📄  Files from this computer".into())).clicked();
-                                remote = ui.add(item(format!("⬇  From GitHub · {repo}"))).clicked();
+                                local = ui.add(item(format!("📄  {}", t("Files from this computer")))).clicked();
+                                remote = ui.add(item(format!("⬇  {}", tf("From GitHub · {0}", &[&repo])))).clicked();
                             },
                         );
                         if local {
@@ -1433,13 +1434,13 @@ impl App {
                         if remote {
                             self.open_repo_picker();
                         }
-                    } else if attach.on_hover_text("Attach files (or drag them onto the window)").clicked() {
+                    } else if attach.on_hover_text(t("Attach files (or drag them onto the window)")).clicked() {
                         self.pick_files();
                     }
                     let edit = egui::TextEdit::multiline(&mut self.input)
                         .id(input_id)
                         .frame(false)
-                        .hint_text(RichText::new("Message…").color(p.weak))
+                        .hint_text(RichText::new(t("Message…")).color(p.weak))
                         .desired_rows(1)
                         .margin(egui::Margin::symmetric(4.0, 9.0))
                         .desired_width(ui.available_width() - 46.0)
@@ -1450,13 +1451,13 @@ impl App {
                         self.focus_input = false;
                     }
                     if self.busy {
-                        if theme::round_button(ui, theme::RoundIcon::Stop, true, 36.0).on_hover_text("Stop the answer").clicked() {
+                        if theme::round_button(ui, theme::RoundIcon::Stop, true, 36.0).on_hover_text(t("Stop the answer")).clicked() {
                             self.stop();
                         }
                     } else {
                         let uploading = self.pending.iter().any(|f| matches!(f.state, FileState::Uploading));
                         let b = theme::round_button(ui, theme::RoundIcon::Send, self.can_send(), 36.0);
-                        let b = if uploading { b.on_hover_text("Waiting for the upload to finish…") } else { b.on_hover_text("Send (Enter)") };
+                        let b = if uploading { b.on_hover_text(t("Waiting for the upload to finish…")) } else { b.on_hover_text(t("Send (Enter)")) };
                         if b.clicked() {
                             send_now = true;
                         }
@@ -1466,7 +1467,7 @@ impl App {
         theme::remember_hover(ui, composer_id, composer.response.hovered() || ui.rect_contains_pointer(composer.response.rect));
         ui.add_space(4.0);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("Enter to send · Shift+Enter for a new line · select text in an answer to reply to it").small().color(p.weak));
+            ui.label(RichText::new(t("Enter to send · Shift+Enter for a new line · select text in an answer to reply to it")).small().color(p.weak));
         });
         if send_now {
             self.send();
@@ -1519,7 +1520,7 @@ impl App {
             theme::avatar(ui, &self.settings.display_name(), if has_history { 44.0 } else { 64.0 });
             ui.add_space(6.0);
             ui.label(RichText::new(self.settings.display_name()).family(theme::bold()).size(if has_history { 19.0 } else { 22.0 }).color(p.text));
-            ui.label(RichText::new("Ask a question, paste code, or attach files with + or by dragging them in.").color(p.weak));
+            ui.label(RichText::new(t("Ask a question, paste code, or attach files with + or by dragging them in.")).color(p.weak));
             ui.add_space(10.0);
         });
 
@@ -1529,18 +1530,18 @@ impl App {
         let mut open = None;
         if let Some(last) = recent.first() {
             let w = ui.available_width();
-            let label = format!("↩  Continue where you left off:  {}", last.title());
+            let label = format!("↩  {}  {}", t("Continue where you left off:"), last.title());
             let label = fit_text(ui, &label, &egui::FontId::new(14.5, theme::bold()), w - 40.0);
             let b = theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).min_size(egui::vec2(w, 44.0)).rounding(14.0);
-            if ui.add(b).on_hover_text(format!("Open your last chat ({})", conversations::when(last.updated))).clicked() {
+            if ui.add(b).on_hover_text(tf("Open your last chat ({0})", &[&conversations::when(last.updated)])).clicked() {
                 open = Some(last.id.clone());
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("RECENT CHATS").size(11.0).family(theme::bold()).color(p.weak));
+                ui.label(RichText::new(t("RECENT CHATS")).size(11.0).family(theme::bold()).color(p.weak));
                 if !self.show_sidebar && recent.len() > 3 {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(theme::Btn::new(theme::Kind::Ghost, RichText::new(format!("Show all {} chats", recent.len())).small())).clicked() {
+                        if ui.add(theme::Btn::new(theme::Kind::Ghost, RichText::new(tf("Show all {0} chats", &[&recent.len().to_string()])).small())).clicked() {
                             self.show_sidebar = true;
                         }
                     });
@@ -1550,19 +1551,19 @@ impl App {
                 let when = conversations::when(c.updated);
                 let preview = c.preview();
                 let sub = if preview.is_empty() { "…".to_string() } else { preview };
-                if menu_row(ui, p, false, "💬", &c.title(), &sub, &[when.as_str()]).on_hover_text("Open this chat").clicked() {
+                if menu_row(ui, p, false, "💬", &c.title(), &sub, &[when.as_str()]).on_hover_text(t("Open this chat")).clicked() {
                     open = Some(c.id.clone());
                 }
             }
             ui.add_space(14.0);
-            ui.label(RichText::new("OR START WITH AN IDEA").size(11.0).family(theme::bold()).color(p.weak));
+            ui.label(RichText::new(t("OR START WITH AN IDEA")).size(11.0).family(theme::bold()).color(p.weak));
             ui.add_space(2.0);
         }
         if let Some(id) = open {
             self.open_chat(&id);
             return;
         }
-        let ideas = crate::i18n::suggestions(self.settings.language.trim());
+        let ideas = crate::i18n::suggestions(&self.settings.ui_language());
         let mut picked = None;
         let cols = if ui.available_width() > 520.0 { 2 } else { 1 };
         for row in ideas.chunks(cols) {
@@ -1570,7 +1571,7 @@ impl App {
                 for (col, idea) in columns.iter_mut().zip(row) {
                     let w = col.available_width();
                     let b = theme::Btn::new(theme::Kind::Card, *idea).min_size(egui::vec2(w, 46.0));
-                    if col.add(b).on_hover_text("Put this in the message box").clicked() {
+                    if col.add(b).on_hover_text(t("Put this in the message box")).clicked() {
                         picked = Some(*idea);
                     }
                 }
@@ -1611,9 +1612,9 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Settings").family(theme::bold()).size(20.0).color(p.text));
+                    ui.label(RichText::new(t("Settings")).family(theme::bold()).size(20.0).color(p.text));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if theme::ghost_button(ui, "✖").on_hover_text("Close").clicked() {
+                        if theme::ghost_button(ui, "✖").on_hover_text(t("Close")).clicked() {
                             close = true;
                         }
                     });
@@ -1621,7 +1622,7 @@ impl App {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    for (i, label) in ["General", "Free AI models", "GitHub", "Advanced"].into_iter().enumerate() {
+                    for (i, label) in [t("General"), t("Free AI models"), t("GitHub"), t("Advanced")].into_iter().enumerate() {
                         let on = self.settings_tab == i;
                         let kind = if on { theme::Kind::Secondary } else { theme::Kind::Ghost };
                         let text = RichText::new(label).color(if on { p.text } else { p.weak });
@@ -1641,8 +1642,8 @@ impl App {
                     ui.set_min_height(max_h);
                     if tab == 0 {
                     section(ui, p, |ui| {
-                        ui.label(RichText::new("Invite link").family(theme::bold()).color(p.text));
-                        ui.label(RichText::new("Paste the link of the shared chat. Everything else is set up automatically.").small().color(p.weak));
+                        ui.label(RichText::new(t("Invite link")).family(theme::bold()).color(p.text));
+                        ui.label(RichText::new(t("Paste the link of the shared chat. Everything else is set up automatically.")).small().color(p.weak));
                         ui.add_space(2.0);
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut self.link_input)
@@ -1653,12 +1654,12 @@ impl App {
                         let pressed_enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            let label = if self.connecting_from_settings { "Connecting…" } else { "Connect" };
+                            let label = if self.connecting_from_settings { t("Connecting…") } else { t("Connect") };
                             let connect = ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(!self.connecting_from_settings));
                             if (connect.clicked() || pressed_enter) && !self.connecting_from_settings {
                                 self.connect_from_settings();
                             }
-                            if theme::secondary_button(ui, "Use class link").on_hover_text(DEFAULT_INVITE_LINK).clicked() {
+                            if theme::secondary_button(ui, t("Use class link")).on_hover_text(DEFAULT_INVITE_LINK).clicked() {
                                 self.link_input = DEFAULT_INVITE_LINK.to_string();
                                 self.connect_from_settings();
                             }
@@ -1680,8 +1681,12 @@ impl App {
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 2.0;
                                     ui.label(RichText::new(self.settings.display_name()).family(theme::bold()).color(p.text));
-                                    let upload = if self.settings.upload_url.trim().is_empty() { "automatic" } else { "custom address" };
-                                    ui.label(RichText::new(format!("Connected · file upload {upload}")).small().color(p.weak))
+                                    let upload = if self.settings.upload_url.trim().is_empty() {
+                                        t("Connected · file upload automatic")
+                                    } else {
+                                        t("Connected · file upload custom address")
+                                    };
+                                    ui.label(RichText::new(upload).small().color(p.weak))
                                         .on_hover_text(self.settings.upload_endpoint());
                                 });
                             });
@@ -1691,11 +1696,11 @@ impl App {
                     ui.add_space(8.0);
                     section(ui, p, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("Appearance").family(theme::bold()).color(p.text));
+                            ui.label(RichText::new(t("Appearance")).family(theme::bold()).color(p.text));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 let current = self.settings.appearance.clone();
                                 let mut choice = if current.is_empty() { "system".to_string() } else { current.clone() };
-                                for (value, label) in [("dark", "Dark"), ("light", "Light"), ("system", "System")] {
+                                for (value, label) in [("dark", t("Dark")), ("light", t("Light")), ("system", t("System"))] {
                                     ui.selectable_value(&mut choice, value.to_string(), label);
                                 }
                                 if choice != current && !(current.is_empty() && choice == "system") {
@@ -1714,16 +1719,16 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
-                                ui.label(RichText::new("Answer language").family(theme::bold()).color(p.text));
-                                ui.label(RichText::new("Sent as a hidden note with every message.").small().color(p.weak));
+                                ui.label(RichText::new(t("Language")).family(theme::bold()).color(p.text));
+                                ui.label(RichText::new(t("Menus, chat names and the bot's answers.")).small().color(p.weak));
                             });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 let current = self.settings.language.clone();
-                                let shown = crate::settings::language(&current).map(|(n, _)| n).unwrap_or("Automatic");
+                                let shown = crate::settings::language(&current).map(|(n, _)| n).unwrap_or(t("Automatic"));
                                 let mut choice = current.clone();
                                 egui::ComboBox::from_id_salt("answer-language").selected_text(shown).width(170.0).height(480.0).show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut choice, String::new(), "Automatic")
-                                        .on_hover_text("No note: the bot chooses (usually the language you write in)");
+                                    ui.selectable_value(&mut choice, String::new(), t("Automatic"))
+                                        .on_hover_text(t("Menus in your system's language; the bot answers in the language you write in"));
                                     for (code, native, english) in crate::settings::LANGUAGES {
                                         ui.selectable_value(&mut choice, code.to_string(), *native).on_hover_text(*english);
                                     }
@@ -1746,7 +1751,7 @@ impl App {
                         section(ui, p, |ui| self.github_settings(ui, p));
                     }
                     if tab == 3 {
-                    ui.label(RichText::new("Only needed if something does not work – Connect normally fills these in.").small().color(p.weak));
+                    ui.label(RichText::new(t("Only needed if something does not work – Connect normally fills these in.")).small().color(p.weak));
                     ui.add_space(8.0);
                     section(ui, p, |ui| {
                         egui::Grid::new("adv").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
@@ -1755,48 +1760,47 @@ impl App {
                                 d.upload_url.clear();
                                 d.upload_endpoint()
                             };
-                            ui.label("Upload address");
-                            ui.add(egui::TextEdit::singleline(&mut self.draft.upload_url).hint_text(format!("automatic: {auto_upload}")).desired_width(330.0))
-                                .on_hover_text("Leave empty: files go to the address that belongs to the invite link.");
+                            ui.label(t("Upload address"));
+                            ui.add(egui::TextEdit::singleline(&mut self.draft.upload_url).hint_text(tf("automatic: {0}", &[&auto_upload])).desired_width(330.0))
+                                .on_hover_text(t("Leave empty: files go to the address that belongs to the invite link."));
                             ui.end_row();
                             ui.label("next-action");
                             ui.add(egui::TextEdit::singleline(&mut self.draft.next_action).desired_width(330.0));
                             ui.end_row();
-                            ui.label("Deployment id");
+                            ui.label(t("Deployment id"));
                             ui.add(egui::TextEdit::singleline(&mut self.draft.deployment_id).desired_width(330.0));
                             ui.end_row();
                             ui.label("GitHub API");
                             ui.add(egui::TextEdit::singleline(&mut self.draft.github_api).hint_text("https://api.github.com").desired_width(330.0))
-                                .on_hover_text("Only for GitHub Enterprise: https://your-host/api/v3");
+                                .on_hover_text(t("Only for GitHub Enterprise: https://your-host/api/v3"));
                             ui.end_row();
-                            ui.label("User agent");
-                            ui.add(egui::TextEdit::singleline(&mut self.draft.user_agent).hint_text("built in").desired_width(330.0));
+                            ui.label(t("User agent"));
+                            ui.add(egui::TextEdit::singleline(&mut self.draft.user_agent).hint_text(t("built in")).desired_width(330.0));
                             ui.end_row();
                         });
                         ui.horizontal(|ui| {
-                            if theme::secondary_button(ui, "Save these values").clicked() {
+                            if theme::secondary_button(ui, t("Save these values")).clicked() {
                                 let s = self.draft.clone();
                                 self.apply_settings(s);
-                                self.settings_note = Some((true, "Saved.".into()));
+                                self.settings_note = Some((true, t("Saved.").into()));
                             }
-                            if theme::secondary_button(ui, "Detect again").on_hover_text("Read the current values from the AIS.chat page").clicked() {
+                            if theme::secondary_button(ui, t("Detect again")).on_hover_text(t("Read the current values from the AIS.chat page")).clicked() {
                                 self.draft.next_action.clear();
                                 self.start_refresh(true);
                             }
                         });
 
                         ui.add_space(6.0);
-                        ui.label(RichText::new("Import from a cURL").family(theme::bold()).color(p.text));
+                        ui.label(RichText::new(t("Import from a cURL")).family(theme::bold()).color(p.text));
                         ui.label(
-                            RichText::new(
-                                "Only if Connect fails: in the browser press F12 → Network, send a message, right-click the \
-                                 dialog?inviteCode=… request → Copy → Copy as cURL, and paste it here.",
-                            )
+                            RichText::new(t(
+                                "Only if Connect fails: in the browser press F12 → Network, send a message, right-click the dialog?inviteCode=… request → Copy → Copy as cURL, and paste it here.",
+                            ))
                             .small()
                             .color(p.weak),
                         );
                         ui.add(egui::TextEdit::multiline(&mut self.curl_input).desired_rows(3).desired_width(f32::INFINITY));
-                        if theme::secondary_button(ui, "Import").clicked() {
+                        if theme::secondary_button(ui, t("Import")).clicked() {
                             let mut s = self.draft.clone();
                             match s.import_curl(&self.curl_input) {
                                 Ok(summary) => {
@@ -1811,14 +1815,14 @@ impl App {
                             }
                         }
                         ui.add_space(4.0);
-                        ui.label(RichText::new(format!("Settings file: {}", Settings::path_display())).small().color(p.weak));
+                        ui.label(RichText::new(tf("Settings file: {0}", &[&Settings::path_display()])).small().color(p.weak));
                     });
                     }
                 });
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if theme::primary_button(ui, "Done").clicked() {
+                        if theme::primary_button(ui, t("Done")).clicked() {
                             close = true;
                         }
                     });
@@ -1848,7 +1852,7 @@ impl App {
     /// Which model answers: the AIS.chat class bot, or a free model of the AI provider.
     fn model_picker(&mut self, ui: &mut egui::Ui, p: theme::Palette) {
         let current = self.settings.model.clone();
-        let label = if current.is_empty() { "🎓 Class bot".to_string() } else { format!("⚡ {}", crate::models::pretty_name(&current)) };
+        let label = if current.is_empty() { format!("🎓 {}", t("Class bot")) } else { format!("⚡ {}", crate::models::pretty_name(&current)) };
         let provider = self.settings.ai_provider();
         let has_key = !self.settings.ai_key().trim().is_empty();
         let mut choice = current.clone();
@@ -1877,23 +1881,23 @@ impl App {
             ui.spacing_mut().item_spacing.y = 2.0;
 
             menu_heading(ui, p, "AIS.chat", None);
-            let class = format!("Class bot · {}", self.settings.display_name());
-            if menu_row(ui, p, choice.is_empty(), "🎓", &class, "Also reads PDFs, images and Office files", &[]).clicked() {
+            let class = tf("Class bot · {0}", &[&self.settings.display_name()]);
+            if menu_row(ui, p, choice.is_empty(), "🎓", &class, t("Also reads PDFs, images and Office files"), &[]).clicked() {
                 choice.clear();
                 close = true;
             }
 
             ui.add_space(6.0);
-            menu_heading(ui, p, &format!("Free via {}", provider.name), self.models_loading.then_some(()));
+            menu_heading(ui, p, &tf("Free via {0}", &[provider.name]), self.models_loading.then_some(()));
             if !has_key {
-                ui.add(egui::Label::new(RichText::new(format!("{} needs a free API key.", provider.name)).small().color(p.warning)).wrap());
+                ui.add(egui::Label::new(RichText::new(tf("{0} needs a free API key.", &[provider.name])).small().color(p.warning)).wrap());
             } else if self.models.is_empty() {
-                ui.label(RichText::new("No models yet – check the key in Settings.").small().color(p.weak));
+                ui.label(RichText::new(t("No models yet – check the key in Settings.")).small().color(p.weak));
             } else {
                 if self.models.len() > 6 {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.model_filter)
-                            .hint_text("🔍 Search models")
+                            .hint_text(format!("🔍 {}", t("Search models")))
                             .desired_width(f32::INFINITY)
                             .margin(egui::Margin::symmetric(8.0, 6.0)),
                     );
@@ -1906,7 +1910,7 @@ impl App {
                     .filter(|m| filter.is_empty() || m.id.to_lowercase().contains(&filter) || crate::models::pretty_name(&m.id).to_lowercase().contains(&filter))
                     .collect();
                 if shown.is_empty() {
-                    ui.label(RichText::new("No model matches.").small().color(p.weak));
+                    ui.label(RichText::new(t("No model matches.")).small().color(p.weak));
                 }
                 egui::ScrollArea::vertical().id_salt("model-list").max_height(320.0).show(ui, |ui| {
                     for m in shown {
@@ -1927,7 +1931,7 @@ impl App {
 
             ui.add_space(4.0);
             ui.separator();
-            let label = if has_key { "⚙  Provider & key…" } else { "⚙  Set up a free model…" };
+            let label = if has_key { format!("⚙  {}", t("Provider & key…")) } else { format!("⚙  {}", t("Set up a free model…")) };
             if ui.add(theme::Btn::new(theme::Kind::Ghost, label).min_size(egui::vec2(0.0, 30.0))).clicked() {
                 open_settings = true;
                 close = true;
@@ -1936,7 +1940,7 @@ impl App {
         if close {
             ui.memory_mut(|m| m.close_popup());
         }
-        button.on_hover_text("Which model answers");
+        button.on_hover_text(t("Which model answers"));
         if open_settings {
             self.open_settings();
         }
@@ -1971,9 +1975,9 @@ impl App {
 
     /// Settings: the provider of the free models and its own API key (not the GitHub token).
     fn models_settings(&mut self, ui: &mut egui::Ui, p: theme::Palette) {
-        ui.label(RichText::new("Free AI models").family(theme::bold()).color(p.text));
+        ui.label(RichText::new(t("Free AI models")).family(theme::bold()).color(p.text));
         ui.label(
-            RichText::new("Pick a free model in the list at the top instead of the class bot. Each provider needs its own free API key.")
+            RichText::new(t("Pick a free model in the list at the top instead of the class bot. Each provider needs its own free API key."))
                 .small()
                 .color(p.weak),
         );
@@ -1981,7 +1985,7 @@ impl App {
         let current = self.settings.ai_provider().id.to_string();
         let mut chosen = current.clone();
         egui::Grid::new("ai").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-            ui.label("Provider");
+            ui.label(t("Provider"));
             egui::ComboBox::from_id_salt("ai-provider").selected_text(self.settings.ai_provider().name).width(300.0).show_ui(ui, |ui| {
                 for pr in crate::models::PROVIDERS {
                     ui.selectable_value(&mut chosen, pr.id.to_string(), pr.name);
@@ -1989,18 +1993,18 @@ impl App {
             });
             ui.end_row();
             if chosen == "custom" {
-                ui.label("Address");
+                ui.label(t("Address"));
                 ui.add(egui::TextEdit::singleline(&mut self.draft.ai_base_url).hint_text("https://…/v1").desired_width(300.0))
-                    .on_hover_text("The OpenAI-compatible API base, e.g. http://localhost:11434/v1 for Ollama");
+                    .on_hover_text(t("The OpenAI-compatible API base, e.g. http://localhost:11434/v1 for Ollama"));
                 ui.end_row();
             }
-            ui.label("API key");
+            ui.label(t("API key"));
             let key = self.draft.ai_keys.entry(chosen.clone()).or_default();
-            ui.add(egui::TextEdit::singleline(key).password(true).hint_text("key from the provider").desired_width(300.0)).on_hover_text(
+            ui.add(egui::TextEdit::singleline(key).password(true).hint_text(t("key from the provider")).desired_width(300.0)).on_hover_text(
                 match self.settings.ai_key_status() {
-                    crate::secret::Status::Stored => "Kept in your system's password store (not in settings.json).",
-                    crate::secret::Status::Unavailable => "This system has no password store, so the key is kept in settings.json.",
-                    crate::secret::Status::Unknown => "Kept in your system's password store if there is one, otherwise in settings.json.",
+                    crate::secret::Status::Stored => t("Kept in your system's password store (not in settings.json)."),
+                    crate::secret::Status::Unavailable => t("This system has no password store, so the key is kept in settings.json."),
+                    crate::secret::Status::Unknown => t("Kept in your system's password store if there is one, otherwise in settings.json."),
                 },
             );
             ui.end_row();
@@ -2020,7 +2024,7 @@ impl App {
             self.load_models();
         }
         ui.horizontal(|ui| {
-            if theme::primary_button(ui, "Save key").clicked() {
+            if theme::primary_button(ui, t("Save key")).clicked() {
                 let mut s = self.settings.clone();
                 let key = self.draft.ai_keys.get(&chosen).map(|k| k.trim().to_string()).unwrap_or_default();
                 if key.is_empty() {
@@ -2030,12 +2034,12 @@ impl App {
                 }
                 s.ai_base_url = self.draft.ai_base_url.trim().to_string();
                 self.apply_settings(s);
-                self.models_note = Some((true, "Saved – the model list is being read.".into()));
+                self.models_note = Some((true, t("Saved – the model list is being read.").into()));
                 self.load_models();
             }
             let pr = self.settings.ai_provider();
             if !pr.key_url.is_empty() {
-                ui.hyperlink_to(RichText::new(format!("Get a free key at {}", pr.name)).small(), pr.key_url);
+                ui.hyperlink_to(RichText::new(tf("Get a free key at {0}", &[pr.name])).small(), pr.key_url);
             }
         });
         if let Some((ok, note)) = &self.models_note {
@@ -2043,7 +2047,7 @@ impl App {
             ui.add(egui::Label::new(RichText::new(note).small().color(c)).wrap());
         }
         ui.label(
-            RichText::new("This key is only for the AI models. The GitHub token (GitHub tab) is only for your repository.")
+            RichText::new(t("This key is only for the AI models. The GitHub token (GitHub tab) is only for your repository."))
                 .small()
                 .color(p.weak),
         );
@@ -2094,8 +2098,8 @@ impl App {
                     .shadow(egui::epaint::Shadow { offset: egui::vec2(0.0, 4.0), blur: 14.0, spread: 0.0, color: Color32::from_black_alpha(60) })
                     .rounding(999.0)
                     .show(ui, |ui| {
-                        ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new("↩  Reply").family(theme::bold()).color(p.on_accent)).rounding(999.0))
-                            .on_hover_text("Reply to the selected text")
+                        ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(format!("↩  {}", t("Reply"))).family(theme::bold()).color(p.on_accent)).rounding(999.0))
+                            .on_hover_text(t("Reply to the selected text"))
                     })
                     .inner
             });
@@ -2119,8 +2123,8 @@ impl App {
             painter.rect_filled(screen, 0.0, Color32::from_black_alpha(150));
             let card = egui::Rect::from_center_size(screen.center(), egui::vec2(screen.width().min(460.0) - 40.0, 160.0));
             painter.rect(card, 20.0, p.panel, Stroke::new(2.0_f32, p.accent));
-            painter.text(card.center() - egui::vec2(0.0, 14.0), egui::Align2::CENTER_CENTER, "Drop files to attach", egui::FontId::new(22.0, theme::bold()), p.text);
-            painter.text(card.center() + egui::vec2(0.0, 20.0), egui::Align2::CENTER_CENTER, "PDFs, images, documents, code …", egui::FontId::proportional(14.0), p.weak);
+            painter.text(card.center() - egui::vec2(0.0, 14.0), egui::Align2::CENTER_CENTER, t("Drop files to attach"), egui::FontId::new(22.0, theme::bold()), p.text);
+            painter.text(card.center() + egui::vec2(0.0, 20.0), egui::Align2::CENTER_CENTER, t("PDFs, images, documents, code …"), egui::FontId::proportional(14.0), p.weak);
         }
     }
 }
@@ -2145,9 +2149,9 @@ impl RepoPicker {
 /// Why a repository file cannot be attached (`None` = it can).
 fn not_attachable(f: &github::RepoFile) -> Option<&'static str> {
     if !ais::is_text_name(&f.path) {
-        Some("Only text and code files can be read by the bot this way.")
+        Some(t("Only text and code files can be read by the bot this way."))
     } else if f.size > INLINE_LIMIT {
-        Some("Larger than 200 KB.")
+        Some(t("Larger than 200 KB."))
     } else {
         None
     }
@@ -2294,8 +2298,8 @@ fn message_row(
 ) -> Option<usize> {
     let mut clicked = None;
     // gentle fade-in for new messages
-    let t = (m.born.elapsed().as_secs_f32() / 0.25).min(1.0);
-    if t < 1.0 {
+    let fade_in = (m.born.elapsed().as_secs_f32() / 0.25).min(1.0);
+    if fade_in < 1.0 {
         ui.ctx().request_repaint_after(Duration::from_millis(16));
     }
     let max_w = (ui.available_width() * 0.8).max(220.0);
@@ -2303,7 +2307,7 @@ fn message_row(
     match m.role {
         Role::User => {
             ui.with_layout(Layout::top_down(Align::Max), |ui| {
-                ui.multiply_opacity(t);
+                ui.multiply_opacity(fade_in);
                 egui::Frame::none()
                     .fill(p.accent)
                     .rounding(Rounding { nw: 18.0, ne: 18.0, sw: 18.0, se: 6.0 })
@@ -2383,7 +2387,7 @@ fn message_row(
         }
         Role::Assistant => {
             ui.horizontal_top(|ui| {
-                ui.multiply_opacity(t);
+                ui.multiply_opacity(fade_in);
                 theme::avatar(ui, name, 30.0);
                 ui.add_space(2.0);
                 ui.vertical(|ui| {
@@ -2426,9 +2430,9 @@ fn message_row(
                         let copied_at: Option<f64> = ui.data(|d| d.get_temp(id));
                         let now = ui.input(|i| i.time);
                         let recently = copied_at.map(|c| now - c < 1.5).unwrap_or(false);
-                        let label = if recently { "✔ Copied" } else { "📋 Copy" };
+                        let label = if recently { format!("✔ {}", t("Copied")) } else { format!("📋 {}", t("Copy")) };
                         let r = ui.add(theme::Btn::new(theme::Kind::Ghost, RichText::new(label).small()));
-                        if r.on_hover_text("Copy the whole answer").clicked() {
+                        if r.on_hover_text(t("Copy the whole answer")).clicked() {
                             ui.ctx().copy_text(m.content.clone());
                             ui.data_mut(|d| d.insert_temp(id, now));
                         }
@@ -2687,6 +2691,7 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::i18n::set_ui_language(&self.settings.ui_language());
         self.handle_messages();
         self.summarise_titles();
 

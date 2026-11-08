@@ -49,7 +49,8 @@ pub struct Settings {
     pub greeting: String,
     /// "system" (default), "light" or "dark".
     pub appearance: String,
-    /// Language the bot should answer in, as a code from [`LANGUAGES`]; empty = automatic.
+    /// Language of the menus and of the bot's answers, as a code from [`LANGUAGES`];
+    /// empty = automatic (menus in the system language, answers in the language of the message).
     pub language: String,
 
     // ---- optional: save code from answers to GitHub
@@ -88,6 +89,20 @@ pub struct Settings {
     /// Greetings the bot translated (for bots whose greeting the app does not know):
     /// language code → [original greeting, translation].
     pub greeting_translations: std::collections::BTreeMap<String, [String; 2]>,
+
+    /// Set for one-off questions (titles, translations, merging): no hidden note at all.
+    #[serde(skip)]
+    pub plain_request: bool,
+}
+
+/// The system's language if the app has menus for it, otherwise English.
+pub fn system_language() -> &'static str {
+    static FOUND: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    FOUND.get_or_init(|| {
+        let locale = sys_locale::get_locale().unwrap_or_default().to_lowercase();
+        let code = locale.split(['-', '_', '.']).next().unwrap_or("");
+        LANGUAGES.iter().map(|(c, _, _)| *c).find(|c| *c == code).unwrap_or("en")
+    })
 }
 
 /// Answer languages: (code, name in the language itself, English name).
@@ -171,11 +186,12 @@ impl Settings {
     /// The greeting shown at the start of a chat, in the answer language if one is chosen and
     /// a translation is known; otherwise the bot's own greeting. Empty if the bot has none.
     pub fn displayed_greeting(&self) -> String {
+        // the class bot's greeting is known in every language, so it follows the menus
+        if let Some(g) = crate::i18n::known_greeting(&self.greeting, &self.ui_language()) {
+            return g.to_string();
+        }
         let lang = self.language.trim();
         if language(lang).is_some() {
-            if let Some(g) = crate::i18n::known_greeting(&self.greeting, lang) {
-                return g.to_string();
-            }
             if let Some([source, translated]) = self.greeting_translations.get(lang) {
                 if *source == self.greeting {
                     return translated.clone();
@@ -198,9 +214,22 @@ impl Settings {
     /// GitHub saving is on – that files are always shown whole and with their path, so they can
     /// be saved as they are. `None` when there is nothing to say.
     pub fn app_note(&self) -> Option<String> {
+        if self.plain_request {
+            return None;
+        }
         let mut parts = Vec::new();
         if let Some((native, english)) = language(self.language.trim()) {
-            parts.push(format!("always answer in {english} ({native}), whatever language the message below is written in."));
+            parts.push(format!(
+                "always answer in {english} ({native}), whatever language the message below or your own instructions \
+                 are written in."
+            ));
+        } else {
+            // the class bot's instructions are German; without this it answers English questions in German
+            parts.push(
+                "answer in the language the message below is written in, even if your own instructions are in another \
+                 language."
+                    .to_string(),
+            );
         }
         if self.github_ready() {
             parts.push(
@@ -217,6 +246,23 @@ impl Settings {
 }
 
 impl Settings {
+    /// Put after the newest message: a chosen answer language is repeated there, because the
+    /// bot's own instructions (German for the class bot) otherwise tend to win.
+    pub fn language_reminder(&self) -> Option<String> {
+        if self.plain_request {
+            return None;
+        }
+        language(self.language.trim()).map(|(_, english)| format!("[Reply in {english}.]"))
+    }
+
+    /// The language of the menus: the chosen one, or the system's.
+    pub fn ui_language(&self) -> String {
+        match language(self.language.trim()) {
+            Some(_) => self.language.trim().to_string(),
+            None => system_language().to_string(),
+        }
+    }
+
     /// `https://app.ais-chat.schule`
     pub fn base(&self) -> String {
         let b = self.base_url.trim().trim_end_matches('/');
@@ -455,7 +501,10 @@ mod tests {
     #[test]
     fn greeting_follows_the_language() {
         let mut s = Settings { greeting: crate::i18n::CLASS_GREETING.into(), ..Default::default() };
-        assert_eq!(s.displayed_greeting(), crate::i18n::CLASS_GREETING, "automatic = the bot's own");
+        let system = crate::i18n::known_greeting(crate::i18n::CLASS_GREETING, system_language()).unwrap();
+        assert_eq!(s.displayed_greeting(), system, "automatic = the system's language");
+        s.language = "de".into();
+        assert_eq!(s.displayed_greeting(), crate::i18n::CLASS_GREETING);
         s.language = "en".into();
         assert_eq!(s.displayed_greeting(), "Hello, how can I help you with coding?");
         assert!(!s.greeting_needs_translation());
