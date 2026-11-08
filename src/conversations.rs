@@ -33,6 +33,9 @@ pub struct Conversation {
     /// A short summary of the first message, written by the bot (used when not renamed).
     #[serde(default)]
     pub summary: Option<String>,
+    /// The answer language (code, "" = automatic) the summary was written for.
+    #[serde(default)]
+    pub summary_lang: String,
     pub messages: Vec<ChatMessage>,
     /// AIS.chat's `sharedSessionId` – uploads belong to it, so it stays with the chat.
     pub session_id: String,
@@ -69,6 +72,7 @@ impl Conversation {
             id: ais::new_session_id(),
             custom_title: None,
             summary: None,
+            summary_lang: String::new(),
             messages: vec![ChatMessage::greeting(greeting)],
             session_id: ais::new_session_id(),
             updated: now(),
@@ -124,9 +128,10 @@ impl Conversation {
         }
     }
 
-    /// The first message as the bot should summarise it, if the chat still needs a title.
-    pub fn needs_summary(&self) -> Option<String> {
-        if self.summary.is_some() || self.custom_title.is_some() {
+    /// The first message as the bot should summarise it, if the chat still needs a title in
+    /// the answer language `lang` (none yet, or one in another language).
+    pub fn needs_summary(&self, lang: &str) -> Option<String> {
+        if self.custom_title.is_some() || (self.summary.is_some() && self.summary_lang == lang) {
             return None;
         }
         let first = self.messages.iter().find(|m| m.role == Role::User)?;
@@ -200,11 +205,16 @@ fn day_group_at(unix: i64, today: chrono::NaiveDate) -> &'static str {
     }
 }
 
-/// The question that asks the bot for a chat title.
-pub fn summary_request(first_message: &str) -> String {
+/// The question that asks the bot for a chat title, in `language` (English name; `None`:
+/// the language of the message).
+pub fn summary_request(first_message: &str, language: Option<&str>) -> String {
+    let lang = match language {
+        Some(l) => format!("Write the title in {l}, even if the message is in another language."),
+        None => "Use the language of the message.".to_string(),
+    };
     format!(
-        "Write a very short title (2 to 6 words) that sums up what this chat message is about. Use the \
-         language of the message. Reply with the title only – no quotes, no full stop, no explanation.\n\n\
+        "Write a very short title (2 to 6 words) that sums up what this chat message is about. {lang} \
+         Reply with the title only – no quotes, no full stop, no explanation.\n\n\
          Message:\n\"\"\"\n{first_message}\n\"\"\""
     )
 }
@@ -282,12 +292,14 @@ mod tests {
     #[test]
     fn summary_wins_over_first_message_but_not_rename() {
         let mut c = Conversation::new("Hi");
-        assert_eq!(c.needs_summary(), None, "nothing to summarise yet");
+        assert_eq!(c.needs_summary(""), None, "nothing to summarise yet");
         c.messages.push(ChatMessage::user("can u help me my python loop prints the same number every time"));
-        assert!(c.needs_summary().unwrap().starts_with("can u help"));
+        assert!(c.needs_summary("").unwrap().starts_with("can u help"));
         c.summary = Some("Python loop repeats a number".into());
         assert_eq!(c.title(), "Python loop repeats a number");
-        assert_eq!(c.needs_summary(), None);
+        assert_eq!(c.needs_summary(""), None);
+        assert!(c.needs_summary("de").is_some(), "a new answer language needs a new title");
+        assert!(summary_request("x", Some("German")).contains("in German"));
         c.custom_title = Some("Homework".into());
         assert_eq!(c.title(), "Homework");
     }

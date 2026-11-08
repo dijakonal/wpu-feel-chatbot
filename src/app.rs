@@ -46,7 +46,7 @@ enum Msg {
     /// The bot translated its greeting (`None`: it did not work).
     GreetingTranslated { lang: String, source: String, text: Option<String> },
     /// The bot summarised the first message of a chat (`None`: it did not work).
-    Summarised { conv: String, title: Option<String> },
+    Summarised { conv: String, lang: String, title: Option<String> },
     // `conv` = id of the chat the work belongs to (it may no longer be the open one)
     Uploaded { conv: String, id: u64, result: Result<String, String> },
     Text { conv: String, gen: u64, text: String },
@@ -98,7 +98,7 @@ pub struct App {
     translating: Option<String>,
     /// Chat whose title is being written by the bot right now (one at a time).
     summarising: Option<String>,
-    /// Chats whose summary failed in this run (not asked again until restart).
+    /// `<chat id>:<language>` of summaries that failed in this run (not asked again until restart).
     summary_failed: std::collections::HashSet<String>,
     /// The "Attach from GitHub" dialog, while open.
     repo_picker: Option<RepoPicker>,
@@ -370,21 +370,25 @@ impl App {
         if self.summarising.is_some() || !can_ask {
             return;
         }
+        // titles follow the answer language; with "Automatic" they use the message's language
+        let lang = self.settings.language.trim().to_string();
+        let english = crate::settings::language(&lang).map(|(_, e)| e.to_string());
         let week_ago = conversations::now() - 7 * 24 * 3600;
-        let wanted = |c: &Conversation| !self.summary_failed.contains(&c.id) && c.needs_summary().is_some();
+        let wanted = |c: &Conversation| !self.summary_failed.contains(&format!("{}:{lang}", c.id)) && c.needs_summary(&lang).is_some();
         let open = Some(self.active).filter(|&i| wanted(&self.convs[i]));
-        let other = || self.convs.iter().position(|c| !c.busy && c.updated > week_ago && wanted(c));
+        // other chats: recent ones, and every one that has a title in another language
+        let other = || self.convs.iter().position(|c| !c.busy && (c.updated > week_ago || c.summary.is_some()) && wanted(c));
         let Some(i) = open.or_else(other) else { return };
-        let Some(first) = self.convs[i].needs_summary() else { return };
+        let Some(first) = self.convs[i].needs_summary(&lang) else { return };
         let conv = self.convs[i].id.clone();
         self.summarising = Some(conv.clone());
         let s = self.settings.clone();
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let reply = crate::backend::ask(&s, &conversations::summary_request(&first));
+            let reply = crate::backend::ask(&s, &conversations::summary_request(&first, english.as_deref()));
             let title = reply.ok().and_then(|r| conversations::clean_summary(&r));
-            let _ = tx.send(Msg::Summarised { conv, title });
+            let _ = tx.send(Msg::Summarised { conv, lang, title });
             ctx.request_repaint();
         });
     }
@@ -613,17 +617,18 @@ impl App {
                         self.refresh_greetings(&before);
                     }
                 }
-                Msg::Summarised { conv, title } => {
+                Msg::Summarised { conv, lang, title } => {
                     self.summarising = None;
                     match title {
                         Some(t) => {
                             if let Some(c) = self.convs.iter_mut().find(|c| c.id == conv) {
                                 c.summary = Some(t);
+                                c.summary_lang = lang;
                                 self.save_chats();
                             }
                         }
                         None => {
-                            self.summary_failed.insert(conv);
+                            self.summary_failed.insert(format!("{conv}:{lang}"));
                         }
                     }
                 }

@@ -7,7 +7,9 @@
   a preview of the last message) above the suggestions.
 - **Chat names sum up the chat:** after the first message the bot writes a short
   title for it (e.g. "Fibonacci numbers in Python") instead of showing the start
-  of the message. Chats from the last week get one too. Renaming a chat still wins.
+  of the message, in the chosen answer language (with *Automatic*: the language of
+  the message). Changing the language renames the chats to match. Chats from the
+  last week get a title too. Renaming a chat yourself still wins.
 - **Tidier chat list:** chats are grouped under *Today*, *Yesterday*, *Last 7 days*
   and *Older*, and each shows the start of its last message. Hovering a chat shows
   rename ✏ and delete 🗑 buttons.
