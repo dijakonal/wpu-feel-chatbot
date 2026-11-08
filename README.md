@@ -50,7 +50,8 @@ To build it yourself, see [Build & run](#build--run).
    bot's greeting is translated by the app itself; for other bots the app asks
    the bot once to translate its greeting and remembers the result.
 6. **Several chats:** the list on the left (☰ hides it) holds all your chats,
-   grouped by day (Today, Yesterday, …). Each one has its own context – its own AIS.chat session,
+   grouped by day (Today, Yesterday, …). Each chat is named with a short summary
+   of its first message, written by the bot. Each one has its own context – its own AIS.chat session,
    history, uploads and unsent draft – so the bot never mixes them up. An answer
    keeps arriving in its chat while you look at another one ("typing…" in the
    list). Hover a chat for ✏ rename and 🗑 delete (a deleted chat can

@@ -30,6 +30,9 @@ pub struct Conversation {
     /// Set by the user with Rename; otherwise the title comes from the first message.
     #[serde(default)]
     pub custom_title: Option<String>,
+    /// A short summary of the first message, written by the bot (used when not renamed).
+    #[serde(default)]
+    pub summary: Option<String>,
     pub messages: Vec<ChatMessage>,
     /// AIS.chat's `sharedSessionId` – uploads belong to it, so it stays with the chat.
     pub session_id: String,
@@ -65,6 +68,7 @@ impl Conversation {
         Self {
             id: ais::new_session_id(),
             custom_title: None,
+            summary: None,
             messages: vec![ChatMessage::greeting(greeting)],
             session_id: ais::new_session_id(),
             updated: now(),
@@ -83,9 +87,11 @@ impl Conversation {
         self.messages.iter().all(|m| m.initial)
     }
 
-    /// Rename wins; otherwise the start of the first message; otherwise "New chat".
+    /// Rename wins; then the bot's summary; otherwise the start of the first message;
+    /// otherwise "New chat".
     pub fn title(&self) -> String {
-        if let Some(t) = self.custom_title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        let named = [&self.custom_title, &self.summary].into_iter().flatten().map(|t| t.trim()).find(|t| !t.is_empty());
+        if let Some(t) = named {
             return t.to_string();
         }
         let first = self.messages.iter().find(|m| m.role == Role::User);
@@ -116,6 +122,23 @@ impl Conversation {
         } else {
             clean
         }
+    }
+
+    /// The first message as the bot should summarise it, if the chat still needs a title.
+    pub fn needs_summary(&self) -> Option<String> {
+        if self.summary.is_some() || self.custom_title.is_some() {
+            return None;
+        }
+        let first = self.messages.iter().find(|m| m.role == Role::User)?;
+        let mut text = first.display.as_deref().unwrap_or(&first.content).trim().to_string();
+        let files: Vec<&str> = first.attachments.iter().map(|a| a.name.as_str()).collect();
+        if !files.is_empty() {
+            text.push_str(&format!("\n[Attached: {}]", files.join(", ")));
+        }
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(text.chars().take(1500).collect())
     }
 
     pub fn touch(&mut self) {
@@ -177,6 +200,36 @@ fn day_group_at(unix: i64, today: chrono::NaiveDate) -> &'static str {
     }
 }
 
+/// The question that asks the bot for a chat title.
+pub fn summary_request(first_message: &str) -> String {
+    format!(
+        "Write a very short title (2 to 6 words) that sums up what this chat message is about. Use the \
+         language of the message. Reply with the title only – no quotes, no full stop, no explanation.\n\n\
+         Message:\n\"\"\"\n{first_message}\n\"\"\""
+    )
+}
+
+/// Take the title out of the bot's answer; `None` if the answer does not look like a title.
+pub fn clean_summary(reply: &str) -> Option<String> {
+    let line = reply.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("```"))?;
+    let mut t: String = line.chars().filter(|c| !matches!(c, '*' | '`' | '_' | '#')).collect();
+    for prefix in ["Title:", "Titel:", "title:", "Titre :", "Titre:", "Título:"] {
+        if let Some(rest) = t.trim().strip_prefix(prefix) {
+            t = rest.to_string();
+        }
+    }
+    let t = t
+        .trim()
+        .trim_matches(|c| matches!(c, '"' | '„' | '“' | '”' | '«' | '»' | '\'' | '‚' | '‘' | '’'))
+        .trim_end_matches(['.', '!', ':', ';', ','])
+        .trim();
+    let words = t.split_whitespace().count();
+    if t.is_empty() || words > 10 || t.chars().count() > 70 {
+        return None;
+    }
+    Some(t.to_string())
+}
+
 /// "14:05" for today, "Yesterday", or "06.11.2026".
 pub fn when(unix: i64) -> String {
     use chrono::{Local, TimeZone};
@@ -224,6 +277,28 @@ mod tests {
         a.content = "## Lists in **Python**\n\n```python\nx = []\n```".into();
         c.messages.push(a);
         assert_eq!(c.preview(), "Lists in Python");
+    }
+
+    #[test]
+    fn summary_wins_over_first_message_but_not_rename() {
+        let mut c = Conversation::new("Hi");
+        assert_eq!(c.needs_summary(), None, "nothing to summarise yet");
+        c.messages.push(ChatMessage::user("can u help me my python loop prints the same number every time"));
+        assert!(c.needs_summary().unwrap().starts_with("can u help"));
+        c.summary = Some("Python loop repeats a number".into());
+        assert_eq!(c.title(), "Python loop repeats a number");
+        assert_eq!(c.needs_summary(), None);
+        c.custom_title = Some("Homework".into());
+        assert_eq!(c.title(), "Homework");
+    }
+
+    #[test]
+    fn cleans_summaries() {
+        assert_eq!(clean_summary("\"Python loop prints same number.\"\n").as_deref(), Some("Python loop prints same number"));
+        assert_eq!(clean_summary("**Titel:** Schleifen in Python").as_deref(), Some("Schleifen in Python"));
+        assert_eq!(clean_summary("\n\n  Rust Hello World  \nSure, here you go!").as_deref(), Some("Rust Hello World"));
+        assert_eq!(clean_summary(""), None);
+        assert_eq!(clean_summary("Sure! Here is a short title that sums up what your message is about in a few words"), None);
     }
 
     #[test]
