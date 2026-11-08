@@ -101,6 +101,23 @@ impl Conversation {
         }
     }
 
+    /// The start of the last message (without Markdown marks), for the "Recent chats" list.
+    pub fn preview(&self) -> String {
+        let last = self.messages.iter().rev().find(|m| !m.initial && !m.content.trim().is_empty());
+        let text = last.map(|m| m.display.as_deref().unwrap_or(&m.content)).unwrap_or("");
+        let line = text
+            .lines()
+            .map(|l| l.trim().trim_start_matches(['#', '>', '-', '*', ' ']).trim())
+            .find(|l| !l.is_empty() && !l.starts_with("```"))
+            .unwrap_or("");
+        let clean: String = line.chars().filter(|c| !matches!(c, '*' | '`' | '_')).collect();
+        if clean.chars().count() > 90 {
+            format!("{}…", clean.chars().take(88).collect::<String>().trim_end())
+        } else {
+            clean
+        }
+    }
+
     pub fn touch(&mut self) {
         self.updated = now();
     }
@@ -180,6 +197,17 @@ mod tests {
         let mut c = Conversation::new("Hi");
         c.messages.push(ChatMessage::user("Why?").with_quote("some quote"));
         assert_eq!(c.title(), "Why?");
+    }
+
+    #[test]
+    fn preview_is_the_start_of_the_last_message() {
+        let mut c = Conversation::new("Hi");
+        assert_eq!(c.preview(), "");
+        c.messages.push(ChatMessage::user("How do lists work?"));
+        let mut a = ChatMessage::assistant_placeholder();
+        a.content = "## Lists in **Python**\n\n```python\nx = []\n```".into();
+        c.messages.push(a);
+        assert_eq!(c.preview(), "Lists in Python");
     }
 
     #[test]

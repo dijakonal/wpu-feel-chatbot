@@ -150,8 +150,11 @@ impl App {
             ctx: cc.egui_ctx.clone(),
             title: String::new(),
         };
-        // always open on a fresh chat; earlier ones are in the sidebar
-        app.new_chat();
+        // carry on where you left off: open the most recent chat (a new one if there is none)
+        match app.convs.iter().enumerate().filter(|(_, c)| !c.is_empty()).max_by_key(|(_, c)| c.updated) {
+            Some((i, _)) => app.active = i,
+            None => app.new_chat(),
+        }
         app.start_refresh(false);
         app.models = crate::models::suggested_models(app.settings.ai_provider());
         app.load_models();
@@ -1343,8 +1346,11 @@ impl App {
 
     fn chat(&mut self, ctx: &egui::Context) {
         let p = theme::palette(ctx.style().visuals.dark_mode);
+        // each chat keeps its own scroll position; a chat opens at its end, the start screen of
+        // an empty chat at the top
+        let (scroll_id, stick) = (self.id.clone(), !self.chat_is_empty());
         egui::CentralPanel::default().frame(egui::Frame::none().fill(p.bg)).show(ctx, |ui| {
-            egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt(("chat", scroll_id)).stick_to_bottom(stick).auto_shrink([false, false]).show(ui, |ui| {
                 centered_column(ui, |ui| {
                     ui.add_space(18.0);
                     if self.chat_is_empty() {
@@ -1377,14 +1383,56 @@ impl App {
 
     /// Shown while the chat is still empty: who the bot is and a few ideas to start with.
     fn welcome(&mut self, ui: &mut egui::Ui, p: theme::Palette) {
-        ui.add_space(24.0);
+        // with earlier chats to show, the header is smaller so everything fits
+        let has_history = self.convs.iter().any(|c| !c.is_empty() && c.id != self.id);
+        ui.add_space(if has_history { 8.0 } else { 24.0 });
         ui.vertical_centered(|ui| {
-            theme::avatar(ui, &self.settings.display_name(), 64.0);
+            theme::avatar(ui, &self.settings.display_name(), if has_history { 44.0 } else { 64.0 });
             ui.add_space(6.0);
-            ui.label(RichText::new(self.settings.display_name()).family(theme::bold()).size(22.0).color(p.text));
+            ui.label(RichText::new(self.settings.display_name()).family(theme::bold()).size(if has_history { 19.0 } else { 22.0 }).color(p.text));
             ui.label(RichText::new("Ask a question, paste code, or attach files with + or by dragging them in.").color(p.weak));
             ui.add_space(10.0);
         });
+
+        // earlier chats: continue the last one, or pick one of the recent ones
+        let mut recent: Vec<&Conversation> = self.convs.iter().filter(|c| !c.is_empty() && c.id != self.id).collect();
+        recent.sort_by(|a, b| b.updated.cmp(&a.updated));
+        let mut open = None;
+        if let Some(last) = recent.first() {
+            let w = ui.available_width();
+            let label = format!("↩  Continue where you left off:  {}", last.title());
+            let label = fit_text(ui, &label, &egui::FontId::new(14.5, theme::bold()), w - 40.0);
+            let b = theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).min_size(egui::vec2(w, 44.0)).rounding(14.0);
+            if ui.add(b).on_hover_text(format!("Open your last chat ({})", conversations::when(last.updated))).clicked() {
+                open = Some(last.id.clone());
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("RECENT CHATS").size(11.0).family(theme::bold()).color(p.weak));
+                if !self.show_sidebar && recent.len() > 3 {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(theme::Btn::new(theme::Kind::Ghost, RichText::new(format!("Show all {} chats", recent.len())).small())).clicked() {
+                            self.show_sidebar = true;
+                        }
+                    });
+                }
+            });
+            for c in recent.iter().take(3) {
+                let when = conversations::when(c.updated);
+                let preview = c.preview();
+                let sub = if preview.is_empty() { "…".to_string() } else { preview };
+                if menu_row(ui, p, false, "💬", &c.title(), &sub, &[when.as_str()]).on_hover_text("Open this chat").clicked() {
+                    open = Some(c.id.clone());
+                }
+            }
+            ui.add_space(14.0);
+            ui.label(RichText::new("OR START WITH AN IDEA").size(11.0).family(theme::bold()).color(p.weak));
+            ui.add_space(2.0);
+        }
+        if let Some(id) = open {
+            self.open_chat(&id);
+            return;
+        }
         let ideas = crate::i18n::suggestions(self.settings.language.trim());
         let mut picked = None;
         let cols = if ui.available_width() > 520.0 { 2 } else { 1 };

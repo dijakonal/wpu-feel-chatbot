@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Pick up where you left off:** the app opens on your last chat. A new chat
+  shows a **Continue where you left off** button and your **recent chats** (with
+  a preview of the last message) above the suggestions.
+
 - **Model list** at the top of the window: the class bot (AIS.chat, default) or a
   free model from **Groq**, **OpenRouter**, **Mistral**, **Google Gemini** or any
   other OpenAI-compatible service – for when the class chat is not available. Each

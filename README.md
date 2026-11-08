@@ -54,7 +54,9 @@ To build it yourself, see [Build & run](#build--run).
    history, uploads and unsent draft – so the bot never mixes them up. An answer
    keeps arriving in its chat while you look at another one ("typing…" in the
    list). Right-click a chat (or double-click it) to rename it; ✖ deletes it
-   after asking. Chats are saved and come back after a restart.
+   after asking. Chats are saved and come back after a restart: the app opens on your
+   last chat, and every new chat starts with **Continue where you left off** and
+   your **recent chats** (they are saved on this computer only).
 7. **➕ New chat** starts a new chat (the current one stays in the list); the round **■** button stops a long answer;
    **Copy** under an answer and on code blocks puts text on the clipboard.
 
