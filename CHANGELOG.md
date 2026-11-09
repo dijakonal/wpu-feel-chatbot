@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0
+## 1.1.0 – 2026-11-09
 
 - **Pick up where you left off:** the app opens on your last chat. A new chat
   shows a **Continue where you left off** button and your **recent chats** (with
