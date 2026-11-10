@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Accounts and chat sync (prototype):** *Settings → Account* logs in to a sync
+  server (new repository
+  [wpu-feel-chatbot-backend](https://github.com/dijakonal/wpu-feel-chatbot-backend)).
+  Chats are then kept on the server and appear on every computer you log in on.
+  New chats, answers, renames and deletions follow within seconds; if a chat was
+  changed on two computers, the newer change wins. The bottom of the chat list
+  shows who is logged in and when the last sync was. API keys and the GitHub
+  token are never sent; the login token is kept in the system password store.
+
 ## 1.1.0 – 2026-11-09
 
 - **Pick up where you left off:** the app opens on your last chat. A new chat

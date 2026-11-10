@@ -60,8 +60,17 @@ To build it yourself, see [Build & run](#build--run).
    list). Hover a chat for ✏ rename and 🗑 delete (a deleted chat can
    be brought back with **Undo** for a few seconds). Chats are saved and come back after a restart: the app opens on your
    last chat, and every new chat starts with **Continue where you left off** and
-   your **recent chats** (they are saved on this computer only).
-7. **➕ New chat** starts a new chat (the current one stays in the list); the round **■** button stops a long answer;
+   your **recent chats** (saved on this computer; with an account also on the
+   sync server, see below).
+7. **Account (optional, prototype):** **⚙ Settings → Account** logs in to a sync
+   server ([wpu-feel-chatbot-backend](https://github.com/dijakonal/wpu-feel-chatbot-backend)).
+   Your chats are then kept on the server and appear on every computer you log in
+   on: new chats, answers, renames and deletions are synced a few seconds after
+   they happen and every 30 seconds. The line at the bottom of the chat list shows
+   who is logged in and when the last sync was. API keys and the GitHub token are
+   never sent. Logging out keeps the chats on this computer. The login token is
+   kept in the system password store like the other secrets.
+8. **➕ New chat** starts a new chat (the current one stays in the list); the round **■** button stops a long answer;
    **Copy** under an answer and on code blocks puts text on the clipboard.
 
 There is nothing to set up. To use a *different* shared character, open
@@ -265,6 +274,7 @@ Without a tag push: on GitHub open **Actions → Build → Run workflow**, tick
 | `src/backend.rs` | sends requests to AIS.chat or to a free AI model |
 | `src/models.rs` | free AI providers (OpenAI-style API): model lists, streaming chat |
 | `src/settings.rs` | invite-link parsing, cURL import, loading/saving settings |
+| `src/sync.rs` | account login and chat sync with the sync server |
 | `src/markdown.rs` | Markdown → egui renderer |
 | `src/theme.rs` | colours (light/dark), fonts, widget style, avatar / send button / typing dots |
 | `assets/fonts/` | Inter (SIL Open Font License, see `Inter-LICENSE.txt`), built into the binary |

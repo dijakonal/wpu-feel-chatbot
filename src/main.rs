@@ -14,6 +14,7 @@ mod merge;
 mod models;
 mod secret;
 mod settings;
+mod sync;
 mod theme;
 mod ui_text;
 

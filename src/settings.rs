@@ -18,6 +18,8 @@ const DEFAULT_BASE: &str = "https://app.ais-chat.schule";
 
 /// Name of the GitHub token in the system password store.
 const TOKEN_NAME: &str = "github-token";
+/// Login token of the sync server (in the password store like the other secrets).
+const SYNC_TOKEN_NAME: &str = "sync-token";
 
 /// Name of a provider's API key in the system password store.
 fn ai_key_name(provider: &str) -> String {
@@ -90,6 +92,14 @@ pub struct Settings {
     /// language code → [original greeting, translation].
     pub greeting_translations: std::collections::BTreeMap<String, [String; 2]>,
 
+    // ---- optional: account on a sync server (chats on every computer)
+    /// e.g. `https://sync.example.org`; empty = not set up.
+    pub sync_server: String,
+    /// The account's user name (kept after logging out, to fill in the form).
+    pub sync_user: String,
+    /// Login token from the server; empty = logged out. Kept in the system password store.
+    pub sync_token: String,
+
     /// Set for one-off questions (titles, translations, merging): no hidden note at all.
     #[serde(skip)]
     pub plain_request: bool,
@@ -161,14 +171,21 @@ impl Settings {
 
     /// Every secret with its name in the password store: the GitHub token and the AI keys.
     fn secrets(&self) -> Vec<(String, String)> {
-        let mut out = vec![(TOKEN_NAME.to_string(), self.github_token.trim().to_string())];
+        let mut out = vec![
+            (TOKEN_NAME.to_string(), self.github_token.trim().to_string()),
+            (SYNC_TOKEN_NAME.to_string(), self.sync_token.trim().to_string()),
+        ];
         out.extend(self.ai_keys.iter().map(|(p, k)| (ai_key_name(p), k.trim().to_string())));
         out
     }
 
     /// Remove the secret `name` from these settings if it still has `value`.
     fn forget_secret(&mut self, name: &str, value: &str) {
-        if name == TOKEN_NAME {
+        if name == SYNC_TOKEN_NAME {
+            if self.sync_token.trim() == value {
+                self.sync_token.clear();
+            }
+        } else if name == TOKEN_NAME {
             if self.github_token.trim() == value {
                 self.github_token.clear();
             }
@@ -371,14 +388,18 @@ impl Settings {
     /// The GitHub token and the AI keys from the system password store, as `(name, value)`.
     /// Can block for a long time – call it on a background thread.
     pub fn load_secrets() -> Vec<(String, String)> {
-        let mut names = vec![TOKEN_NAME.to_string()];
+        let mut names = vec![TOKEN_NAME.to_string(), SYNC_TOKEN_NAME.to_string()];
         names.extend(crate::models::PROVIDERS.iter().map(|p| ai_key_name(p.id)));
         names.into_iter().filter_map(|n| crate::secret::load(&n).map(|v| (n, v))).collect()
     }
 
     /// Put a secret read from the password store into these settings (if not set already).
     pub fn set_secret(&mut self, name: &str, value: String) {
-        if name == TOKEN_NAME {
+        if name == SYNC_TOKEN_NAME {
+            if self.sync_token.trim().is_empty() && !self.sync_user.trim().is_empty() {
+                self.sync_token = value;
+            }
+        } else if name == TOKEN_NAME {
             if self.github_token.trim().is_empty() {
                 self.github_token = value;
             }
@@ -424,6 +445,11 @@ impl Settings {
             });
         }
         Ok(())
+    }
+
+    /// Logged in to a sync server.
+    pub fn sync_ready(&self) -> bool {
+        !self.sync_server.trim().is_empty() && !self.sync_token.trim().is_empty()
     }
 
     /// Where the GitHub token is kept, as far as known (never blocks).
@@ -525,7 +551,7 @@ mod tests {
         s.ai_keys.insert("groq".into(), "gsk".into());
         s.ai_keys.insert("mistral".into(), "mst".into());
         let names: Vec<String> = s.secrets().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, ["github-token", "ai-key-groq", "ai-key-mistral"]);
+        assert_eq!(names, ["github-token", "sync-token", "ai-key-groq", "ai-key-mistral"]);
         assert_eq!(s.ai_key(), "gsk", "Groq is the default provider");
         s.ai_provider = "mistral".into();
         assert_eq!(s.ai_key(), "mst");
@@ -537,6 +563,16 @@ mod tests {
         fresh.set_secret("ai-key-groq", "gsk2".into());
         fresh.set_secret("github-token", "ghp2".into());
         assert_eq!((fresh.ai_key(), fresh.github_token.as_str()), ("gsk2".to_string(), "ghp2"));
+
+        // the sync login: only restored while an account is set up
+        fresh.set_secret("sync-token", "tok".into());
+        assert!(fresh.sync_token.is_empty() && !fresh.sync_ready());
+        fresh.sync_user = "lena".into();
+        fresh.sync_server = "https://sync.example.org".into();
+        fresh.set_secret("sync-token", "tok".into());
+        assert!(fresh.sync_ready());
+        fresh.forget_secret("sync-token", "tok");
+        assert!(!fresh.sync_ready() && fresh.github_token == "ghp2");
     }
 
     #[test]

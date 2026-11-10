@@ -46,6 +46,11 @@ enum Msg {
     ModelsLoaded(String, Result<Vec<crate::models::Model>, String>),
     /// The bot translated its greeting (`None`: it did not work).
     GreetingTranslated { lang: String, source: String, text: Option<String> },
+    /// Logging in to the sync server finished: `(server, token, user name)`.
+    LoggedIn(Result<(String, String, String), String>),
+    /// A sync finished: the new revision and the changes from elsewhere, or
+    /// `(login no longer valid, message)`.
+    Synced(Result<(i64, Vec<crate::sync::Item>), (bool, String)>),
     /// The bot summarised the first message of a chat (`None`: it did not work).
     Summarised { conv: String, lang: String, title: Option<String> },
     // `conv` = id of the chat the work belongs to (it may no longer be the open one)
@@ -85,6 +90,18 @@ pub struct App {
     drag_origin: Option<egui::Pos2>,
     /// Open page of the settings dialog (0 General, 1 Free AI models, 2 GitHub, 3 Advanced).
     settings_tab: usize,
+
+    // ---- account on the sync server
+    sync_state: crate::sync::SyncState,
+    /// The sync that is running (its changes are noted once the server took them).
+    sync_in_flight: Option<crate::sync::Outgoing>,
+    /// `ctx` time of the next sync (sooner after a change, every 30 s otherwise).
+    next_sync: std::cell::Cell<f64>,
+    /// Result of the last login or sync, when worth showing.
+    sync_note: Option<(bool, String)>,
+    logging_in: bool,
+    /// Typed into the login form (never saved).
+    account_password: String,
 
     // settings window
     show_settings: bool,
@@ -142,6 +159,12 @@ impl App {
             selection_anchor: None,
             drag_origin: None,
             settings_tab: 0,
+            sync_state: crate::sync::SyncState::load(),
+            sync_in_flight: None,
+            next_sync: std::cell::Cell::new(0.0),
+            sync_note: None,
+            logging_in: false,
+            account_password: String::new(),
             show_settings: false,
             curl_input: String::new(),
             settings_note: None,
@@ -420,6 +443,11 @@ impl App {
         let Some(i) = self.convs.iter().position(|c| c.id == id) else { return };
         let open_id = self.id.clone();
         let removed = self.convs.remove(i);
+        if self.settings.sync_ready() {
+            // other computers delete it too (sent once Undo is no longer possible)
+            self.sync_state.deleted.insert(removed.id.clone(), conversations::now());
+            self.sync_state.save();
+        }
         self.undo_delete = Some((removed, self.ctx.input(|i| i.time)));
         if self.convs.is_empty() {
             self.convs.push(Conversation::new(&self.greeting()));
@@ -432,6 +460,9 @@ impl App {
     /// Bring the chat deleted last back.
     fn undo_delete_chat(&mut self) {
         let Some((c, _)) = self.undo_delete.take() else { return };
+        if self.sync_state.deleted.remove(&c.id).is_some() {
+            self.sync_state.save();
+        }
         // added at the end, so the open chat keeps its index
         self.convs.push(c);
         self.save_chats();
@@ -444,6 +475,7 @@ impl App {
         let left = SHOW_FOR - (ctx.input(|i| i.time) - at);
         if left <= 0.0 {
             self.undo_delete = None;
+            self.sync_soon(); // the deletion can go to the other computers now
             return;
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -485,6 +517,7 @@ impl App {
             self.undo_delete_chat();
         } else if dismiss {
             self.undo_delete = None;
+            self.sync_soon();
         }
     }
 
@@ -495,6 +528,115 @@ impl App {
     fn save_chats(&self) {
         if let Err(e) = conversations::save(&self.convs) {
             eprintln!("could not save chats: {e}");
+        }
+        // something changed: sync it in a moment
+        let soon = self.ctx.input(|i| i.time) + 2.0;
+        self.next_sync.set(self.next_sync.get().min(soon));
+    }
+
+    // ------------------------------------------------------------------ account & sync
+
+    fn sync_soon(&self) {
+        let soon = self.ctx.input(|i| i.time) + 1.0;
+        self.next_sync.set(self.next_sync.get().min(soon));
+    }
+
+    fn account_key(&self) -> String {
+        format!("{}|{}", self.settings.sync_server.trim(), self.settings.sync_user.trim())
+    }
+
+    /// Start a sync when one is due.
+    fn sync_tick(&mut self, ctx: &egui::Context) {
+        if !self.settings.sync_ready() || self.sync_in_flight.is_some() || self.logging_in {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        let due = self.next_sync.get();
+        if now < due {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64((due - now).min(60.0)));
+            return;
+        }
+        self.start_sync();
+    }
+
+    fn start_sync(&mut self) {
+        let account = self.account_key();
+        if self.sync_state.account != account {
+            self.sync_state.reset(&account);
+        }
+        let mut out = crate::sync::outgoing(&self.convs, &self.sync_state);
+        // a deletion that can still be undone waits
+        if let Some((c, _)) = &self.undo_delete {
+            out.items.retain(|i| i.id != c.id);
+            out.sent_deleted.retain(|id| *id != c.id);
+        }
+        let server = self.settings.sync_server.trim().to_string();
+        let token = self.settings.sync_token.trim().to_string();
+        let send = out.clone();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::sync::sync(&server, &token, &send)
+                .map_err(|e| (e.downcast_ref::<crate::sync::Unauthorized>().is_some(), e.to_string()));
+            let _ = tx.send(Msg::Synced(result));
+            ctx.request_repaint();
+        });
+        self.sync_in_flight = Some(out);
+        self.next_sync.set(f64::INFINITY);
+    }
+
+    fn start_login(&mut self, create: bool) {
+        let server = match crate::sync::normalize_server(&self.draft.sync_server) {
+            Ok(s) => s,
+            Err(e) => {
+                self.sync_note = Some((false, e.to_string()));
+                return;
+            }
+        };
+        let user = self.draft.sync_user.trim().to_string();
+        let password = self.account_password.clone();
+        if user.is_empty() || password.is_empty() {
+            self.sync_note = Some((false, t("Enter the user name and password.").into()));
+            return;
+        }
+        self.logging_in = true;
+        self.sync_note = None;
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::sync::login(&server, &user, &password, create).map(|(token, name)| (server, token, name)).map_err(|e| e.to_string());
+            let _ = tx.send(Msg::LoggedIn(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Log out: the server forgets the token; the chats stay on this computer.
+    fn logout(&mut self) {
+        let server = self.settings.sync_server.trim().to_string();
+        let token = self.settings.sync_token.trim().to_string();
+        std::thread::spawn(move || crate::sync::logout(&server, &token));
+        let mut s = self.settings.clone();
+        s.sync_token.clear();
+        self.draft.sync_token.clear();
+        self.apply_settings(s);
+        self.sync_state.reset("");
+        self.sync_state.save();
+        self.sync_in_flight = None;
+        self.sync_note = None;
+    }
+
+    /// One line about the sync: what is going on, or when it last worked.
+    fn sync_status(&self) -> (bool, String) {
+        if self.sync_in_flight.is_some() {
+            return (true, t("Syncing…").to_string());
+        }
+        if let Some((false, e)) = &self.sync_note {
+            return (false, e.clone());
+        }
+        if self.sync_state.last_sync > 0 && self.sync_state.account == self.account_key() {
+            (true, tf("Last synced {0}", &[&conversations::when(self.sync_state.last_sync)]))
+        } else {
+            (true, t("Not synced yet").to_string())
         }
     }
 
@@ -579,6 +721,62 @@ impl App {
                             Err(e) => FileState::Failed(e),
                         };
                     }
+                }
+                Msg::LoggedIn(result) => {
+                    self.logging_in = false;
+                    match result {
+                        Ok((server, token, user)) => {
+                            let mut s = self.settings.clone();
+                            s.sync_server = server.clone();
+                            s.sync_user = user.clone();
+                            s.sync_token = token.clone();
+                            self.draft.sync_server = server;
+                            self.draft.sync_user = user;
+                            self.draft.sync_token = token;
+                            self.apply_settings(s);
+                            self.account_password.clear();
+                            // start from zero: send every chat, get every chat
+                            let account = self.account_key();
+                            self.sync_state.reset(&account);
+                            self.sync_state.save();
+                            self.sync_note = Some((true, t("Logged in. Your chats are being synced.").into()));
+                            self.next_sync.set(0.0);
+                        }
+                        Err(e) => self.sync_note = Some((false, e)),
+                    }
+                }
+                Msg::Synced(result) => {
+                    let Some(out) = self.sync_in_flight.take() else { continue }; // logged out meanwhile
+                    let now = self.ctx.input(|i| i.time);
+                    match result {
+                        Ok((rev, changes)) => {
+                            let active_id = self.id.clone();
+                            let applied = crate::sync::apply(&mut self.convs, &mut self.sync_state, &out, rev, changes);
+                            if self.convs.is_empty() {
+                                self.convs.push(Conversation::new(&self.greeting()));
+                            }
+                            // keep the open chat open; if it was deleted elsewhere, open the newest
+                            self.active = self.convs.iter().position(|c| c.id == active_id).unwrap_or_else(|| self.newest_index());
+                            if applied.anything() {
+                                // (not save_chats: that would start the next sync right away)
+                                let _ = conversations::save(&self.convs);
+                            }
+                            self.sync_state.save();
+                            if matches!(self.sync_note, Some((false, _))) {
+                                self.sync_note = None;
+                            }
+                        }
+                        Err((expired, e)) => {
+                            if expired {
+                                let mut s = self.settings.clone();
+                                s.sync_token.clear();
+                                self.draft.sync_token.clear();
+                                self.apply_settings(s);
+                            }
+                            self.sync_note = Some((false, e));
+                        }
+                    }
+                    self.next_sync.set(self.next_sync.get().min(now + 30.0));
                 }
                 Msg::SecretsLoaded(secrets) => {
                     let had_key = !self.settings.ai_key().trim().is_empty();
@@ -770,7 +968,9 @@ impl App {
                 let active_id = self.id.clone();
                 let mut open = None;
                 let mut delete = None;
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                const FOOTER: f32 = 44.0;
+                let list_h = (ui.available_height() - FOOTER).max(60.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(list_h).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     let mut group = "";
                     for i in order {
@@ -800,6 +1000,24 @@ impl App {
                     self.delete_chat(&id);
                 } else if let Some(id) = open {
                     self.open_chat(&id);
+                }
+
+                // account and sync state; opens Settings → Account
+                ui.add_space(6.0);
+                let (ok, status) = if self.settings.sync_ready() {
+                    let (ok, s) = self.sync_status();
+                    (ok, format!("{} · {s}", self.settings.sync_user))
+                } else {
+                    (true, t("Log in to sync your chats").to_string())
+                };
+                let icon = if !ok { "⚠  " } else if self.settings.sync_ready() && self.sync_in_flight.is_none() { "✔  " } else { "" };
+                let font = egui::FontId::proportional(12.0);
+                let text = fit_end(ui, &format!("{icon}{status}"), &font, w - 24.0);
+                let color = if ok { p.weak } else { p.danger };
+                let b = theme::Btn::new(theme::Kind::Ghost, RichText::new(text).font(font).color(color)).min_size(egui::vec2(w, 32.0));
+                if ui.add(b).on_hover_text(t("Account")).clicked() {
+                    self.open_settings();
+                    self.settings_tab = 1;
                 }
             });
     }
@@ -1237,6 +1455,87 @@ impl App {
         }
     }
 
+    /// Settings → Account: log in to the sync server, or see the sync state.
+    fn account_settings(&mut self, ui: &mut egui::Ui, p: theme::Palette) {
+        ui.label(RichText::new(t("Account")).family(theme::bold()).color(p.text));
+        if self.settings.sync_ready() {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                theme::avatar(ui, &self.settings.sync_user, 32.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new(tf("Logged in as {0}", &[&self.settings.sync_user])).family(theme::bold()).color(p.text));
+                    ui.label(RichText::new(&self.settings.sync_server).small().color(p.weak));
+                });
+            });
+            ui.add_space(4.0);
+            let (ok, status) = self.sync_status();
+            let shown = if !ok { format!("⚠ {status}") } else if self.sync_in_flight.is_some() { status } else { format!("✔ {status}") };
+            ui.add(egui::Label::new(RichText::new(shown).color(if ok { p.weak } else { p.danger })).wrap());
+            ui.horizontal(|ui| {
+                let syncing = self.sync_in_flight.is_some();
+                if ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(t("Sync now")).family(theme::bold())).enabled(!syncing)).clicked() {
+                    self.sync_note = None;
+                    self.next_sync.set(0.0);
+                }
+                if theme::secondary_button(ui, t("Log out")).clicked() {
+                    self.logout();
+                }
+                if syncing {
+                    ui.add(egui::Spinner::new().size(16.0));
+                }
+            });
+            ui.label(RichText::new(t("Your chats stay on this computer when you log out.")).small().color(p.weak));
+            return;
+        }
+
+        ui.label(RichText::new(t("Log in to keep your chats on a server and continue them on any computer.")).small().color(p.weak));
+        ui.add_space(4.0);
+        let mut submit = false;
+        egui::Grid::new("account").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            ui.label(t("Server"));
+            ui.add(egui::TextEdit::singleline(&mut self.draft.sync_server).hint_text("https://…").desired_width(300.0));
+            ui.end_row();
+            ui.label(t("User name"));
+            ui.add(egui::TextEdit::singleline(&mut self.draft.sync_user).desired_width(300.0));
+            ui.end_row();
+            ui.label(t("Password"));
+            let r = ui.add(egui::TextEdit::singleline(&mut self.account_password).password(true).desired_width(300.0));
+            submit = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            ui.end_row();
+        });
+        if let Ok(server) = crate::sync::normalize_server(&self.draft.sync_server) {
+            if crate::sync::is_insecure(&server) {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("⚠ {}", t("Without https the password is sent unencrypted – only use this in a network you trust.")))
+                            .small()
+                            .color(p.warning),
+                    )
+                    .wrap(),
+                );
+            }
+        }
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let label = if self.logging_in { t("Logging in…") } else { t("Log in") };
+            let login = ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(!self.logging_in));
+            if (login.clicked() || submit) && !self.logging_in {
+                self.start_login(false);
+            }
+            if ui.add(theme::Btn::new(theme::Kind::Secondary, t("Create account")).enabled(!self.logging_in)).clicked() {
+                self.start_login(true);
+            }
+            if self.logging_in {
+                ui.add(egui::Spinner::new().size(16.0));
+            }
+        });
+        if let Some((ok, note)) = &self.sync_note {
+            let c = if *ok { p.success } else { p.danger };
+            ui.add(egui::Label::new(RichText::new(if *ok { format!("✔ {note}") } else { format!("⚠ {note}") }).color(c)).wrap());
+        }
+    }
+
     fn open_settings(&mut self) {
         self.draft = self.settings.clone();
         self.link_input = self.settings.invite_link.clone();
@@ -1622,7 +1921,7 @@ impl App {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    for (i, label) in [t("General"), t("Free AI models"), t("GitHub"), t("Advanced")].into_iter().enumerate() {
+                    for (i, label) in [t("General"), t("Account"), t("Free AI models"), t("GitHub"), t("Advanced")].into_iter().enumerate() {
                         let on = self.settings_tab == i;
                         let kind = if on { theme::Kind::Secondary } else { theme::Kind::Ghost };
                         let text = RichText::new(label).color(if on { p.text } else { p.weak });
@@ -1745,12 +2044,15 @@ impl App {
 
                     }
                     if tab == 1 {
-                        section(ui, p, |ui| self.models_settings(ui, p));
+                        section(ui, p, |ui| self.account_settings(ui, p));
                     }
                     if tab == 2 {
-                        section(ui, p, |ui| self.github_settings(ui, p));
+                        section(ui, p, |ui| self.models_settings(ui, p));
                     }
                     if tab == 3 {
+                        section(ui, p, |ui| self.github_settings(ui, p));
+                    }
+                    if tab == 4 {
                     ui.label(RichText::new(t("Only needed if something does not work – Connect normally fills these in.")).small().color(p.weak));
                     ui.add_space(8.0);
                     section(ui, p, |ui| {
@@ -2694,6 +2996,7 @@ impl eframe::App for App {
         crate::i18n::set_ui_language(&self.settings.ui_language());
         self.handle_messages();
         self.summarise_titles();
+        self.sync_tick(ctx);
 
         // text captured by the Reply button last frame
         if let Some(text) = ctx.data_mut(|d| d.remove_temp::<String>(capture_text_id())) {
