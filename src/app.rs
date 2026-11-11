@@ -98,6 +98,9 @@ pub struct App {
     /// Open page of the settings dialog (0 General, 1 Free AI models, 2 GitHub, 3 Advanced).
     settings_tab: usize,
 
+    /// When the last frame was drawn (drawing is paced here, not by vsync).
+    last_frame: std::time::Instant,
+
     // ---- school login (Moodle): the app is locked until it worked
     school_login_ok: bool,
     school_login_checking: bool,
@@ -177,6 +180,7 @@ impl App {
             selection_anchor: None,
             drag_origin: None,
             settings_tab: 0,
+            last_frame: std::time::Instant::now(),
             school_login_ok: false,
             school_login_checking: false,
             school_login_user: moodle_user,
@@ -3188,6 +3192,15 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // At most about 60 frames a second (vsync is off, see `main`), so animations do not
+        // use a whole processor core.
+        const FRAME: Duration = Duration::from_millis(16);
+        let since_last = self.last_frame.elapsed();
+        if since_last < FRAME {
+            std::thread::sleep(FRAME - since_last);
+        }
+        self.last_frame = std::time::Instant::now();
+
         crate::i18n::set_ui_language(&self.settings.ui_language());
         self.handle_messages();
 

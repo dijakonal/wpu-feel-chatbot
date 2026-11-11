@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Fixed "Application Not Responding" on Linux (Wayland):** the desktop reported
+  the app as frozen when its window was hidden, for example after switching to
+  another workspace. The app no longer waits for the display before drawing.
 - **Credits:** with an account on the sync server, every message to the bot costs
   one credit. The person who runs the server sets the limit in its new dashboard
   (per day, per week, per account). The bottom of the chat list shows the balance
