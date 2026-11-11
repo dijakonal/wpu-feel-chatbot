@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Nicer account display:** the bottom of the chat list is now a small account
+  card with your name, the sync state and a credit bar that turns orange when
+  credits run low and red when they are used up. *Settings → Account* shows the
+  same bar, and the school login screen sits in a framed card.
 - **Fixed "Application Not Responding" on Linux (Wayland):** the desktop reported
   the app as frozen when its window was hidden, for example after switching to
   another workspace. The app no longer waits for the display before drawing.

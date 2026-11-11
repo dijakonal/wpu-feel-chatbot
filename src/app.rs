@@ -1050,7 +1050,7 @@ impl App {
                 let active_id = self.id.clone();
                 let mut open = None;
                 let mut delete = None;
-                const FOOTER: f32 = 44.0;
+                const FOOTER: f32 = 68.0;
                 let list_h = (ui.available_height() - FOOTER).max(60.0);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(list_h).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -1084,24 +1084,43 @@ impl App {
                     self.open_chat(&id);
                 }
 
-                // account and sync state; opens Settings → Account
+                // the account card: who is logged in, the sync state and the credits;
+                // a click opens Settings → Account
                 ui.add_space(6.0);
-                let (ok, status) = if self.settings.sync_ready() {
-                    let (ok, s) = self.sync_status();
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, FOOTER - 6.0), egui::Sense::click());
+                let hov = theme::hover_anim(ui, resp.id, resp.hovered());
+                ui.painter().rect(rect, 12.0, theme::mix(p.surface, p.surface_hi, hov), Stroke::new(1.0_f32, p.border));
+                let name_font = egui::FontId::new(13.0, theme::bold());
+                let line_font = egui::FontId::proportional(11.5);
+                if self.settings.sync_ready() {
+                    let avatar = egui::Rect::from_center_size(egui::pos2(rect.left() + 26.0, rect.center().y), egui::vec2(30.0, 30.0));
+                    theme::avatar(&mut ui.new_child(egui::UiBuilder::new().max_rect(avatar)), &self.settings.sync_user, 30.0);
+                    let x = rect.left() + 50.0;
+                    let room = rect.right() - 12.0 - x;
+                    let (ok, status) = self.sync_status();
+                    let credits = self.credits.clone().filter(|_| ok);
+                    let blocked = credits.as_ref().is_some_and(|c| c.blocked);
                     // the credits matter more than the time of the last sync
-                    match self.credits_line().filter(|_| ok) {
-                        Some(credits) => (!self.credits.as_ref().is_some_and(|c| c.blocked), format!("{} · {credits}", self.settings.sync_user)),
-                        None => (ok, format!("{} · {s}", self.settings.sync_user)),
+                    let (line, color) = match self.credits_line().filter(|_| ok) {
+                        Some(c) => (c, if blocked { p.danger } else { p.weak }),
+                        None => (if ok { status } else { format!("⚠ {status}") }, if ok { p.weak } else { p.danger }),
+                    };
+                    let meter = credits.as_ref().filter(|c| !c.blocked).and_then(|c| c.limit.map(|l| (c.used, l)));
+                    let top = if meter.is_some() { rect.top() + 9.0 } else { rect.center().y - 16.0 };
+                    let name = fit_end(ui, &self.settings.sync_user, &name_font, room);
+                    ui.painter().text(egui::pos2(x, top), egui::Align2::LEFT_TOP, name, name_font, p.text);
+                    let line = fit_end(ui, &line, &line_font, room);
+                    ui.painter().text(egui::pos2(x, top + 17.0), egui::Align2::LEFT_TOP, line, line_font, color);
+                    if let Some((used, limit)) = meter {
+                        let bar = egui::Rect::from_min_size(egui::pos2(x, top + 36.0), egui::vec2(room, 4.0));
+                        credit_meter(ui.painter(), bar, used, limit, p);
                     }
                 } else {
-                    (true, t("Log in to sync your chats").to_string())
-                };
-                let icon = if !ok { "⚠  " } else if self.settings.sync_ready() && self.sync_in_flight.is_none() { "✔  " } else { "" };
-                let font = egui::FontId::proportional(12.0);
-                let text = fit_end(ui, &format!("{icon}{status}"), &font, w - 24.0);
-                let color = if ok { p.weak } else { p.danger };
-                let b = theme::Btn::new(theme::Kind::Ghost, RichText::new(text).font(font).color(color)).min_size(egui::vec2(w, 32.0));
-                if ui.add(b).on_hover_text(t("Account")).clicked() {
+                    let text = fit_end(ui, t("Log in to sync your chats"), &line_font, w - 24.0);
+                    let color = theme::mix(p.weak, p.text, hov);
+                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(12.5), color);
+                }
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("Account")).clicked() {
                     self.open_settings();
                     self.settings_tab = 1;
                 }
@@ -1547,10 +1566,19 @@ impl App {
         let p = theme::palette(ctx.style().visuals.dark_mode);
         let mut submit = false;
         egui::CentralPanel::default().frame(egui::Frame::none().fill(p.bg)).show(ctx, |ui| {
-            let width = ui.available_width().min(420.0);
-            ui.add_space((ui.available_height() - 470.0).max(20.0) / 2.0);
+            const PAD: f32 = 28.0;
+            let width = (ui.available_width() - 2.0 * PAD - 24.0).min(400.0);
+            ui.add_space((ui.available_height() - 540.0).max(16.0) / 2.0);
             ui.vertical_centered(|ui| {
-                ui.set_max_width(width);
+              let card = egui::Frame::none()
+                  .fill(p.panel)
+                  .stroke(Stroke::new(1.0_f32, p.border))
+                  .rounding(18.0)
+                  .inner_margin(egui::Margin::same(PAD))
+                  .shadow(egui::epaint::Shadow { offset: egui::vec2(0.0, 10.0), blur: 32.0, spread: 0.0, color: Color32::from_black_alpha(40) });
+              card.show(ui, |ui| {
+              ui.set_width(width);
+              ui.vertical_centered(|ui| {
                 theme::avatar(ui, &self.settings.display_name(), 56.0);
                 ui.add_space(10.0);
                 ui.label(RichText::new(t("Log in with your school account")).family(theme::bold()).size(20.0).color(p.text));
@@ -1583,7 +1611,7 @@ impl App {
 
                 // What happens with the password – said right where it is typed in.
                 ui.add_space(16.0);
-                egui::Frame::none().fill(p.surface).rounding(10.0).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
+                egui::Frame::none().fill(p.surface_hi).rounding(10.0).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
                     ui.set_width(width - 24.0);
                     ui.add(
                         egui::Label::new(
@@ -1597,6 +1625,8 @@ impl App {
                     );
                     ui.hyperlink_to(RichText::new(t("How this works")).small(), SCHOOL_LOGIN_EXPLAINED);
                 });
+              });
+              });
             });
         });
         if submit && !self.school_login_checking {
@@ -1649,6 +1679,11 @@ impl App {
                     None => line,
                 };
                 ui.add(egui::Label::new(RichText::new(text).color(p.weak)).wrap()).on_hover_text(t("One credit = one message to the bot."));
+                if let Some((used, limit)) = self.credits.as_ref().filter(|c| !c.blocked).and_then(|c| c.limit.map(|l| (c.used, l))) {
+                    let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(320.0), 6.0), egui::Sense::hover());
+                    credit_meter(ui.painter(), bar, used, limit, p);
+                    ui.add_space(4.0);
+                }
             }
             ui.horizontal(|ui| {
                 let syncing = self.sync_in_flight.is_some();
@@ -3079,6 +3114,24 @@ fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
 
 /// `text` shortened with "…" (in the middle, so the file extension stays visible) until it is
 /// at most `max` pixels wide.
+/// A thin bar that fills up as credits are spent: orange from 80 %, red when all are used.
+fn credit_meter(painter: &egui::Painter, rect: egui::Rect, used: i64, limit: i64, p: theme::Palette) {
+    let share = if limit <= 0 { 1.0 } else { (used as f32 / limit as f32).clamp(0.0, 1.0) };
+    let color = if share >= 1.0 {
+        p.danger
+    } else if share >= 0.8 {
+        p.warning
+    } else {
+        p.accent
+    };
+    let rounding = rect.height() / 2.0;
+    painter.rect_filled(rect, rounding, p.surface_hi);
+    if share > 0.0 {
+        let filled = egui::Rect::from_min_size(rect.min, egui::vec2((rect.width() * share).max(rect.height()), rect.height()));
+        painter.rect_filled(filled, rounding, color);
+    }
+}
+
 /// What the chat says when the server refuses a credit.
 fn no_credits_text(c: &crate::sync::Credits) -> String {
     if c.blocked {
