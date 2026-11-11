@@ -26,6 +26,9 @@ const REPO_BUDGET: usize = 300 * 1024;
 
 const FALLBACK_GREETING: &str = "Hello! How can I help you?";
 
+/// The plain-language explanation of the school login, shown under the login box.
+const SCHOOL_LOGIN_EXPLAINED: &str = "https://github.com/dijakonal/wpu-feel-chatbot/blob/main/docs/MOODLE-LOGIN.md";
+
 enum Msg {
     /// Background setup finished. `from_settings`: started by the Connect button.
     Refreshed { result: Result<(Settings, String), String>, from_settings: bool },
@@ -46,6 +49,8 @@ enum Msg {
     ModelsLoaded(String, Result<Vec<crate::models::Model>, String>),
     /// The bot translated its greeting (`None`: it did not work).
     GreetingTranslated { lang: String, source: String, text: Option<String> },
+    /// The school login was checked at Moodle (see `moodle_login.rs`).
+    SchoolLoginChecked { username: String, result: crate::moodle_login::LoginResult },
     /// Logging in to the sync server finished: `(server, token, user name)`.
     LoggedIn(Result<(String, String, String), String>),
     /// A sync finished: the new revision and the changes from elsewhere, or
@@ -90,6 +95,14 @@ pub struct App {
     drag_origin: Option<egui::Pos2>,
     /// Open page of the settings dialog (0 General, 1 Free AI models, 2 GitHub, 3 Advanced).
     settings_tab: usize,
+
+    // ---- school login (Moodle): the app is locked until it worked
+    school_login_ok: bool,
+    school_login_checking: bool,
+    school_login_user: String,
+    /// Only held while typing; handed to the check and then gone (never saved).
+    school_login_password: String,
+    school_login_error: Option<&'static str>,
 
     // ---- account on the sync server
     sync_state: crate::sync::SyncState,
@@ -141,6 +154,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         let settings = Settings::load();
+        let moodle_user = settings.moodle_user.clone();
         theme::set_appearance(&cc.egui_ctx, &settings.appearance);
         let (tx, rx) = channel();
         let mut app = Self {
@@ -159,6 +173,11 @@ impl App {
             selection_anchor: None,
             drag_origin: None,
             settings_tab: 0,
+            school_login_ok: false,
+            school_login_checking: false,
+            school_login_user: moodle_user,
+            school_login_password: String::new(),
+            school_login_error: None,
             sync_state: crate::sync::SyncState::load(),
             sync_in_flight: None,
             next_sync: std::cell::Cell::new(0.0),
@@ -720,6 +739,25 @@ impl App {
                             Ok(text) => FileState::Ready(AttachmentData::Inline(text)),
                             Err(e) => FileState::Failed(e),
                         };
+                    }
+                }
+                Msg::SchoolLoginChecked { username, result } => {
+                    use crate::moodle_login::LoginResult;
+                    self.school_login_checking = false;
+                    match result {
+                        LoginResult::Accepted => {
+                            self.school_login_ok = true;
+                            self.school_login_error = None;
+                            self.focus_input = true;
+                            // remember the user name (not the password) for next time
+                            if self.settings.moodle_user != username {
+                                let mut s = self.settings.clone();
+                                s.moodle_user = username;
+                                self.apply_settings(s);
+                            }
+                        }
+                        LoginResult::WrongNameOrPassword => self.school_login_error = Some("Wrong user name or password."),
+                        LoginResult::CouldNotCheck(problem) => self.school_login_error = Some(problem),
                     }
                 }
                 Msg::LoggedIn(result) => {
@@ -1453,6 +1491,90 @@ impl App {
             let c = if *ok { p.success } else { p.danger };
             ui.add(egui::Label::new(RichText::new(if *ok { format!("✔ {note}") } else { format!("⚠ {note}") }).color(c)).wrap());
         }
+    }
+
+    /// The box that asks for the school login before the chat can be used.
+    /// The check itself is in `moodle_login.rs`.
+    fn school_login_screen(&mut self, ctx: &egui::Context) {
+        let p = theme::palette(ctx.style().visuals.dark_mode);
+        let mut submit = false;
+        egui::CentralPanel::default().frame(egui::Frame::none().fill(p.bg)).show(ctx, |ui| {
+            let width = ui.available_width().min(420.0);
+            ui.add_space((ui.available_height() - 470.0).max(20.0) / 2.0);
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(width);
+                theme::avatar(ui, &self.settings.display_name(), 56.0);
+                ui.add_space(10.0);
+                ui.label(RichText::new(t("Log in with your school account")).family(theme::bold()).size(20.0).color(p.text));
+                ui.label(RichText::new(t("Use your Moodle login of the school (moodle.ohg-goe.net).")).color(p.weak));
+                ui.add_space(14.0);
+
+                let enabled = !self.school_login_checking;
+                ui.add_enabled(enabled, login_field(&mut self.school_login_user, t("User name"), false, width));
+                ui.add_space(6.0);
+                let pw = ui.add_enabled(enabled, login_field(&mut self.school_login_password, t("Password"), true, width));
+                if pw.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    submit = true;
+                }
+                ui.add_space(10.0);
+                let label = if self.school_login_checking { t("Checking…") } else { t("Log in") };
+                let button = theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold()))
+                    .min_size(egui::vec2(width, 40.0))
+                    .enabled(enabled);
+                if ui.add(button).clicked() {
+                    submit = true;
+                }
+                if self.school_login_checking {
+                    ui.add_space(6.0);
+                    ui.add(egui::Spinner::new().size(18.0));
+                }
+                if let Some(error) = self.school_login_error {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(format!("⚠ {}", t(error))).color(p.danger));
+                }
+
+                // What happens with the password – said right where it is typed in.
+                ui.add_space(16.0);
+                egui::Frame::none().fill(p.surface).rounding(10.0).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
+                    ui.set_width(width - 24.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(t(
+                                "Your password is only sent to moodle.ohg-goe.net to check it. It is not saved and not sent anywhere else.",
+                            ))
+                            .small()
+                            .color(p.weak),
+                        )
+                        .wrap(),
+                    );
+                    ui.hyperlink_to(RichText::new(t("How this works")).small(), SCHOOL_LOGIN_EXPLAINED);
+                });
+            });
+        });
+        if submit && !self.school_login_checking {
+            self.start_school_login();
+        }
+    }
+
+    /// Hand the user name and password to the check (in the background) and forget the
+    /// password here right away.
+    fn start_school_login(&mut self) {
+        let username = self.school_login_user.trim().to_string();
+        let password = std::mem::take(&mut self.school_login_password); // the box is empty again
+        if username.is_empty() || password.is_empty() {
+            self.school_login_error = Some("Wrong user name or password.");
+            return;
+        }
+        self.school_login_checking = true;
+        self.school_login_error = None;
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::moodle_login::check_login(&username, &password);
+            drop(password); // not needed any more
+            let _ = tx.send(Msg::SchoolLoginChecked { username, result });
+            ctx.request_repaint();
+        });
     }
 
     /// Settings → Account: log in to the sync server, or see the sync state.
@@ -2901,6 +3023,15 @@ fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
 
 /// `text` shortened with "…" (in the middle, so the file extension stays visible) until it is
 /// at most `max` pixels wide.
+/// A text box of the school login screen.
+fn login_field<'a>(text: &'a mut String, hint: &str, password: bool, width: f32) -> egui::TextEdit<'a> {
+    egui::TextEdit::singleline(text)
+        .hint_text(hint.to_string())
+        .password(password)
+        .margin(egui::Margin::symmetric(12.0, 10.0))
+        .desired_width(width)
+}
+
 /// Like `fit_text`, but cuts at the end – for sentences (titles, previews).
 fn fit_end(ui: &egui::Ui, text: &str, font: &egui::FontId, max: f32) -> String {
     if text_width(ui, text, font) <= max {
@@ -2995,6 +3126,13 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         crate::i18n::set_ui_language(&self.settings.ui_language());
         self.handle_messages();
+
+        // Nothing else happens until the school login (Moodle) has worked.
+        if !self.school_login_ok {
+            self.school_login_screen(ctx);
+            return;
+        }
+
         self.summarise_titles();
         self.sync_tick(ctx);
 

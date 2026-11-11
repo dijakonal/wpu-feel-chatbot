@@ -92,6 +92,10 @@ pub struct Settings {
     /// language code → [original greeting, translation].
     pub greeting_translations: std::collections::BTreeMap<String, [String; 2]>,
 
+    /// The Moodle user name of the last successful school login – only to fill in the
+    /// login box next time. (The password is never saved; see `moodle_login.rs`.)
+    pub moodle_user: String,
+
     // ---- optional: account on a sync server (chats on every computer)
     /// e.g. `https://sync.example.org`; empty = not set up.
     pub sync_server: String,

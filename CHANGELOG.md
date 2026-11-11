@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **School login:** the chat can only be used after logging in with the school's
+  Moodle account. The app checks the user name and password at
+  https://moodle.ohg-goe.net – the password is sent only there, is never saved,
+  and the app logs out of Moodle again right after the check. The check is one
+  commented file, `src/moodle_login.rs`, explained step by step in English and
+  German in `docs/MOODLE-LOGIN.md`.
 - **Accounts and chat sync (prototype):** *Settings → Account* logs in to a sync
   server (new repository
   [wpu-feel-chatbot-backend](https://github.com/dijakonal/wpu-feel-chatbot-backend)).

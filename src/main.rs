@@ -12,6 +12,7 @@ mod i18n;
 mod markdown;
 mod merge;
 mod models;
+mod moodle_login;
 mod secret;
 mod settings;
 mod sync;
