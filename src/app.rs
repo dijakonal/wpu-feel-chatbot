@@ -55,7 +55,9 @@ enum Msg {
     LoggedIn(Result<(String, String, String), String>),
     /// A sync finished: the new revision and the changes from elsewhere, or
     /// `(login no longer valid, message)`.
-    Synced(Result<(i64, Vec<crate::sync::Item>), (bool, String)>),
+    Synced(Result<(i64, Vec<crate::sync::Item>, Option<crate::sync::Credits>), (bool, String)>),
+    /// The server said where the account's credits stand.
+    Credits(crate::sync::Credits),
     /// The bot summarised the first message of a chat (`None`: it did not work).
     Summarised { conv: String, lang: String, title: Option<String> },
     // `conv` = id of the chat the work belongs to (it may no longer be the open one)
@@ -113,6 +115,8 @@ pub struct App {
     /// Result of the last login or sync, when worth showing.
     sync_note: Option<(bool, String)>,
     logging_in: bool,
+    /// The account's credits as the server last reported them.
+    credits: Option<crate::sync::Credits>,
     /// Typed into the login form (never saved).
     account_password: String,
 
@@ -183,6 +187,7 @@ impl App {
             next_sync: std::cell::Cell::new(0.0),
             sync_note: None,
             logging_in: false,
+            credits: None,
             account_password: String::new(),
             show_settings: false,
             curl_input: String::new(),
@@ -344,7 +349,29 @@ impl App {
         let gen = self.gen;
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
+        // with an account, the sync server is asked for a credit first
+        let account = self.settings.sync_ready().then(|| (s.sync_server.trim().to_string(), s.sync_token.trim().to_string()));
         std::thread::spawn(move || {
+            if let Some((server, token)) = account {
+                let refused = match crate::sync::spend_credit(&server, &token) {
+                    Ok(crate::sync::Spend::Spent(c)) => {
+                        let _ = tx.send(Msg::Credits(c));
+                        None
+                    }
+                    Ok(crate::sync::Spend::Refused(c)) => {
+                        let text = no_credits_text(&c);
+                        let _ = tx.send(Msg::Credits(c));
+                        Some(text)
+                    }
+                    Ok(crate::sync::Spend::NoCredits) => None,
+                    Err(e) => Some(tf("Could not check your credits: {0}", &[&e.to_string()])),
+                };
+                if let Some(text) = refused {
+                    let _ = tx.send(Msg::ReplyDone { conv, gen, result: Err(text) });
+                    ctx.request_repaint();
+                    return;
+                }
+            }
             let result = reply_worker(&mut s, &history, &session, &conv, gen, &tx, &ctx);
             let _ = tx.send(Msg::ReplyDone { conv, gen, result: result.map_err(|e| e.to_string()) });
             ctx.request_repaint();
@@ -642,6 +669,17 @@ impl App {
         self.sync_state.save();
         self.sync_in_flight = None;
         self.sync_note = None;
+        self.credits = None;
+    }
+
+    /// "12 of 50 credits used", if the server limits credits.
+    fn credits_line(&self) -> Option<String> {
+        let c = self.credits.as_ref()?;
+        if c.blocked {
+            return Some(t("This account was blocked.").to_string());
+        }
+        let limit = c.limit?;
+        Some(tf("{0} of {1} credits used", &[&c.used.to_string(), &limit.to_string()]))
     }
 
     /// One line about the sync: what is going on, or when it last worked.
@@ -783,11 +821,13 @@ impl App {
                         Err(e) => self.sync_note = Some((false, e)),
                     }
                 }
+                Msg::Credits(c) => self.credits = Some(c),
                 Msg::Synced(result) => {
                     let Some(out) = self.sync_in_flight.take() else { continue }; // logged out meanwhile
                     let now = self.ctx.input(|i| i.time);
                     match result {
-                        Ok((rev, changes)) => {
+                        Ok((rev, changes, credits)) => {
+                            self.credits = credits;
                             let active_id = self.id.clone();
                             let applied = crate::sync::apply(&mut self.convs, &mut self.sync_state, &out, rev, changes);
                             if self.convs.is_empty() {
@@ -1044,7 +1084,11 @@ impl App {
                 ui.add_space(6.0);
                 let (ok, status) = if self.settings.sync_ready() {
                     let (ok, s) = self.sync_status();
-                    (ok, format!("{} · {s}", self.settings.sync_user))
+                    // the credits matter more than the time of the last sync
+                    match self.credits_line().filter(|_| ok) {
+                        Some(credits) => (!self.credits.as_ref().is_some_and(|c| c.blocked), format!("{} · {credits}", self.settings.sync_user)),
+                        None => (ok, format!("{} · {s}", self.settings.sync_user)),
+                    }
                 } else {
                     (true, t("Log in to sync your chats").to_string())
                 };
@@ -1594,6 +1638,14 @@ impl App {
             let (ok, status) = self.sync_status();
             let shown = if !ok { format!("⚠ {status}") } else if self.sync_in_flight.is_some() { status } else { format!("✔ {status}") };
             ui.add(egui::Label::new(RichText::new(shown).color(if ok { p.weak } else { p.danger })).wrap());
+            if let Some(line) = self.credits_line() {
+                let refill = self.credits.as_ref().and_then(|c| c.resets_at).map(|at| tf("New credits: {0}", &[&conversations::when_exact(at)]));
+                let text = match refill {
+                    Some(r) => format!("{line} · {r}"),
+                    None => line,
+                };
+                ui.add(egui::Label::new(RichText::new(text).color(p.weak)).wrap()).on_hover_text(t("One credit = one message to the bot."));
+            }
             ui.horizontal(|ui| {
                 let syncing = self.sync_in_flight.is_some();
                 if ui.add(theme::Btn::new(theme::Kind::Primary, RichText::new(t("Sync now")).family(theme::bold())).enabled(!syncing)).clicked() {
@@ -3023,6 +3075,18 @@ fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
 
 /// `text` shortened with "…" (in the middle, so the file extension stays visible) until it is
 /// at most `max` pixels wide.
+/// What the chat says when the server refuses a credit.
+fn no_credits_text(c: &crate::sync::Credits) -> String {
+    if c.blocked {
+        return t("This account was blocked.").to_string();
+    }
+    let (used, limit) = (c.used.to_string(), c.limit.unwrap_or(0).to_string());
+    match c.resets_at {
+        Some(at) => tf("No credits left ({0} of {1} used). New credits: {2}", &[&used, &limit, &conversations::when_exact(at)]),
+        None => tf("No credits left ({0} of {1} used).", &[&used, &limit]),
+    }
+}
+
 /// A text box of the school login screen.
 fn login_field<'a>(text: &'a mut String, hint: &str, password: bool, width: f32) -> egui::TextEdit<'a> {
     egui::TextEdit::singleline(text)

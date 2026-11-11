@@ -240,6 +240,17 @@ pub fn clean_summary(reply: &str) -> Option<String> {
     Some(t.to_string())
 }
 
+/// A moment with its time: "14:05" for today, otherwise "12.11. 00:00".
+pub fn when_exact(unix: i64) -> String {
+    use chrono::{Local, TimeZone};
+    let Some(t) = Local.timestamp_opt(unix, 0).single() else { return String::new() };
+    if t.date_naive() == Local::now().date_naive() {
+        t.format("%H:%M").to_string()
+    } else {
+        t.format("%d.%m. %H:%M").to_string()
+    }
+}
+
 /// "14:05" for today, "Yesterday", or "06.11.2026".
 pub fn when(unix: i64) -> String {
     use chrono::{Local, TimeZone};

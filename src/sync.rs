@@ -296,7 +296,7 @@ pub fn logout(server: &str, token: &str) {
 }
 
 /// Send the changes; returns the new revision and the changes from elsewhere.
-pub fn sync(server: &str, token: &str, out: &Outgoing) -> Result<(i64, Vec<Item>)> {
+pub fn sync(server: &str, token: &str, out: &Outgoing) -> Result<(i64, Vec<Item>, Option<Credits>)> {
     let body = json!({ "since": out.since, "changes": out.items });
     let resp = client()?.post(format!("{server}/api/v1/sync")).bearer_auth(token).header("content-type", "application/json").body(body.to_string()).send().map_err(unreachable)?;
     let status = resp.status().as_u16();
@@ -308,9 +308,56 @@ pub fn sync(server: &str, token: &str, out: &Outgoing) -> Result<(i64, Vec<Item>
     struct Answer {
         rev: i64,
         changes: Vec<Item>,
+        /// (servers before the credit system do not send this)
+        credits: Option<Credits>,
     }
     let a: Answer = serde_json::from_str(&text).map_err(|_| anyhow!("Unexpected answer from the sync server."))?;
-    Ok((a.rev, a.changes))
+    Ok((a.rev, a.changes, a.credits))
+}
+
+// ------------------------------------------------------------------ credits
+
+/// Where the account's credits stand (one credit = one message to the bot). The person who
+/// runs the server sets the limit in its dashboard.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct Credits {
+    /// Spent in the current period.
+    pub used: i64,
+    /// Credits per period; `None` = no limit.
+    pub limit: Option<i64>,
+    /// Unix time of the next refill, if there is one.
+    pub resets_at: Option<i64>,
+    #[serde(default)]
+    pub blocked: bool,
+}
+
+/// The server's answer to "may I send a message?".
+#[derive(Debug, PartialEq)]
+pub enum Spend {
+    /// One credit was spent.
+    Spent(Credits),
+    /// The limit is used up (or the account is blocked): do not send.
+    Refused(Credits),
+    /// A server from before the credit system: nothing to check.
+    NoCredits,
+}
+
+/// Ask the server to spend one credit. The app calls this before each message to the bot.
+pub fn spend_credit(server: &str, token: &str) -> Result<Spend> {
+    let resp = client()?.post(format!("{server}/api/v1/credits/spend")).bearer_auth(token).send().map_err(unreachable)?;
+    let status = resp.status().as_u16();
+    let text = resp.text().unwrap_or_default();
+    read_spend(status, &text)
+}
+
+fn read_spend(status: u16, text: &str) -> Result<Spend> {
+    let credits = || serde_json::from_str::<Value>(text).ok().and_then(|v| serde_json::from_value::<Credits>(v["credits"].clone()).ok());
+    match (status, credits()) {
+        (200, Some(c)) => Ok(Spend::Spent(c)),
+        (402 | 403, Some(c)) => Ok(Spend::Refused(c)),
+        (404, _) => Ok(Spend::NoCredits),
+        _ => Err(failure(status, text)),
+    }
 }
 
 #[cfg(test)]
@@ -417,6 +464,19 @@ mod tests {
     }
 
     #[test]
+    fn reads_credit_answers() {
+        let left = r#"{"credits":{"used":3,"limit":50,"period":"day","resets_at":1794438000,"blocked":false}}"#;
+        assert_eq!(read_spend(200, left).unwrap(), Spend::Spent(Credits { used: 3, limit: Some(50), resets_at: Some(1794438000), blocked: false }));
+        let out = r#"{"error":"No credits left.","credits":{"used":50,"limit":50,"period":"never","resets_at":null,"blocked":false}}"#;
+        assert!(matches!(read_spend(402, out).unwrap(), Spend::Refused(c) if c.used == 50 && c.resets_at.is_none()));
+        let blocked = r#"{"error":"blocked","credits":{"used":1,"limit":null,"period":"day","resets_at":1,"blocked":true}}"#;
+        assert!(matches!(read_spend(403, blocked).unwrap(), Spend::Refused(c) if c.blocked));
+        assert_eq!(read_spend(404, "").unwrap(), Spend::NoCredits, "an older server");
+        assert!(read_spend(401, "").unwrap_err().downcast_ref::<Unauthorized>().is_some());
+        assert!(read_spend(500, "").is_err());
+    }
+
+    #[test]
     fn explains_server_errors() {
         assert!(failure(401, "").downcast_ref::<Unauthorized>().is_some());
         assert_eq!(failure(422, r#"{"error":"At most 1000 items"}"#).to_string(), "At most 1000 items");
@@ -436,20 +496,27 @@ mod tests {
         let mut here = vec![chat("a", 10, "from the laptop")];
         let mut state_here = SyncState::default();
         let out = outgoing(&here, &state_here);
-        let (rev, changes) = sync(&server, &laptop, &out).expect("sync");
+        let (rev, changes, _) = sync(&server, &laptop, &out).expect("sync");
         apply(&mut here, &mut state_here, &out, rev, changes);
 
         let mut there = vec![chat("b", 20, "from the phone")];
         let mut state_there = SyncState::default();
         let out = outgoing(&there, &state_there);
-        let (rev, changes) = sync(&server, &phone, &out).expect("sync");
+        let (rev, changes, _) = sync(&server, &phone, &out).expect("sync");
         apply(&mut there, &mut state_there, &out, rev, changes);
         assert_eq!(there.len(), 2, "the phone got the laptop's chat");
 
         let out = outgoing(&here, &state_here);
-        let (rev, changes) = sync(&server, &laptop, &out).expect("sync");
+        let (rev, changes, _) = sync(&server, &laptop, &out).expect("sync");
         apply(&mut here, &mut state_here, &out, rev, changes);
         assert_eq!(here.len(), 2, "and the other way round");
+
+        // credits: every spend counts up; the sync answer reports the same number
+        let Spend::Spent(first) = spend_credit(&server, &laptop).expect("spend") else { panic!("not spent") };
+        let Spend::Spent(second) = spend_credit(&server, &phone).expect("spend") else { panic!("not spent") };
+        assert_eq!(second.used, first.used + 1, "both computers share the account's credits");
+        let (_, _, credits) = sync(&server, &laptop, &outgoing(&here, &state_here)).expect("sync");
+        assert_eq!(credits.map(|c| c.used), Some(second.used));
 
         logout(&server, &phone);
         let err = sync(&server, &phone, &outgoing(&there, &state_there)).unwrap_err();

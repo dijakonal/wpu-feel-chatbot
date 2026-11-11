@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Credits:** with an account on the sync server, every message to the bot costs
+  one credit. The person who runs the server sets the limit in its new dashboard
+  (per day, per week, per account). The bottom of the chat list shows the balance
+  ("12 of 50 credits used"); when the limit is reached, the chat says so and when
+  new credits arrive.
 - **School login:** the chat can only be used after logging in with the school's
   Moodle account. The app checks the user name and password at
   https://moodle.ohg-goe.net – the password is sent only there, is never saved,
