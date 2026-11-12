@@ -18,6 +18,10 @@
 //!   Moodle session stays open.
 //! - Nothing from your Moodle account is read: no courses, no grades, no messages, no
 //!   name. The only thing the app learns is "the login worked" or "it did not".
+//! - If a sync server is set up (Settings → Account), the app also logs you in there with
+//!   your school user name. It does NOT send your password there: `sync_code` (at the end of
+//!   this file) turns the password into a different code that cannot be turned back into
+//!   the password, and only that code is sent to the sync server.
 //!
 //! A plain-language explanation (English and German) is in `docs/MOODLE-LOGIN.md`.
 //!
@@ -146,6 +150,26 @@ fn unexpected_answer() -> &'static str {
     "The school's Moodle answered in an unexpected way. Try again later."
 }
 
+// ------------------------------------------------------------------ the sync server
+
+/// The code the app logs in to the sync server with, instead of the school password.
+///
+/// It is made from the user name and the password with Argon2id, a "one-way" function: the
+/// same name and password always give the same code (so it works on every computer), but
+/// the code does not lead back to the password. Argon2id is also slow on purpose, so trying
+/// out many passwords to find one that gives the same code takes very long.
+///
+/// The fixed text in `salt` makes the code belong to this app only: it is not the same as
+/// anything another website could have stored about the password.
+pub fn sync_code(username: &str, password: &str) -> String {
+    use argon2::Argon2;
+    let salt = format!("ais-chat-client sync login for {}", username.trim().to_lowercase());
+    let mut code = [0u8; 32];
+    // only fails for impossible lengths (the salt is long enough, the output 32 bytes)
+    Argon2::default().hash_password_into(password.as_bytes(), salt.as_bytes(), &mut code).expect("argon2");
+    code.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 // ------------------------------------------------------------------ small helpers
 // They only read text that Moodle sent back. None of them sends anything.
 
@@ -220,6 +244,16 @@ mod tests {
         assert_eq!(check_login("", "secret"), LoginResult::WrongNameOrPassword);
         assert_eq!(check_login("lena", ""), LoginResult::WrongNameOrPassword);
         assert_eq!(check_login("Guest", "guest"), LoginResult::WrongNameOrPassword);
+    }
+
+    #[test]
+    fn sync_code_is_fixed_and_does_not_contain_the_password() {
+        let a = sync_code("Lena.M", "correct horse");
+        assert_eq!(a, sync_code(" lena.m ", "correct horse"), "same name and password, same code");
+        assert_ne!(a, sync_code("lena.m", "correct horsE"), "another password, another code");
+        assert_ne!(a, sync_code("tom", "correct horse"), "another name, another code");
+        assert_eq!(a.len(), 64);
+        assert!(!a.contains("horse"));
     }
 
     /// Talks to the real Moodle once, with a made-up account:

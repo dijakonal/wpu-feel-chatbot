@@ -2,6 +2,21 @@
 
 Every commit raises the last number of the version (in `Cargo.toml`) and is listed here.
 
+## 1.2.4 – 2026-11-12
+
+- **Sync login with the school account:** after the school login on the start
+  screen, the app logs in to the sync server by itself, with your school user name.
+  The account is created on first use, so the same school login gives you the same
+  chats on every computer. *Settings → Account* also has a **Log in as … (school
+  account)** button for when the server address is entered later.
+- **Your school password is still not sent to the sync server:** the app turns it
+  into a separate code (Argon2id) that cannot be turned back into the password, and
+  only that code goes there. `docs/MOODLE-LOGIN.md` explains this in English and
+  German.
+- If the school password was changed, the old sync account no longer accepts the
+  new code; the app says so, and the account can be deleted in the server's
+  dashboard.
+
 ## 1.2.3 – 2026-11-12
 
 - **Fixed: GitHub token, API keys and the sync login disappeared after a restart.**

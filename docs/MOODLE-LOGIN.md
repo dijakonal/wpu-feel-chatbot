@@ -14,6 +14,7 @@ logging in on the Moodle website.
 | Is the connection encrypted? | **Yes**, always (https). The code refuses plain http. |
 | Is the password saved? | **No.** Not in a file, not in the settings, not in the password store, not in a log. |
 | Does anyone else get it? | **No.** Not the chat bot, not AIS.chat, not GitHub, not the sync server, not the developers. |
+| And the sync server? | It gets your **user name** and a **code made from the password**, never the password itself (see below). |
 | What does the app learn from Moodle? | Only **"login worked"** or **"login did not work"**. It reads no courses, grades, messages or names. |
 | Does a Moodle session stay open? | **No.** The app logs out of Moodle again right after the check. |
 | What is saved? | Only your **user name**, so you don't have to type it again next time. |
@@ -41,6 +42,21 @@ log in on the Moodle website.
 Afterwards the password is forgotten. The text box is emptied as soon as you press **Log in**,
 and the check throws its copy away when it is done.
 
+## The sync server
+
+If a sync server is set up (*Settings → Account*), the app logs you in there too, with your
+school user name, so your chats are on every computer without a second password. The sync
+server does **not** get your password. After a successful Moodle login, the app makes a code
+from your user name and password with **Argon2id** (function `sync_code` in
+`src/moodle_login.rs`) and sends only that code.
+
+- The same name and password always give the same code, so it works on every computer.
+- The code cannot be turned back into the password. Argon2id is also slow on purpose, so
+  guessing passwords until one gives the same code takes very long.
+- The code is kept in memory only while the app runs and is never saved.
+- If you change your school password, the code changes too. The sync account then has to be
+  deleted in the server's dashboard once, and the app creates it again.
+
 ## Check it yourself
 
 The whole check is in one file: [`src/moodle_login.rs`](../src/moodle_login.rs). It is about
@@ -53,8 +69,9 @@ Where the password appears in the code:
 | file | place | what happens |
 |---|---|---|
 | `src/app.rs` | field `school_login_password` | holds what you type into the password box |
-| `src/app.rs` | function `start_school_login` | takes the password out of the box (the box is empty again) and hands it to the check |
+| `src/app.rs` | function `start_school_login` | takes the password out of the box (the box is empty again) and hands it to the check and, if Moodle accepted it, to `sync_code` |
 | `src/moodle_login.rs` | function `check_login` → `try_login` | puts it into the login form for moodle.ohg-goe.net (step 2) |
+| `src/moodle_login.rs` | function `sync_code` | makes the code for the sync server from it (only after Moodle accepted it) |
 
 That's all. You can confirm it by searching the code for `school_login_password` and for
 `check_login`. The address that is actually contacted is written in `src/moodle_login.rs`
@@ -94,6 +111,7 @@ genau wie beim Anmelden auf der Moodle-Webseite.
 | Ist die Verbindung verschlüsselt? | **Ja**, immer (https). Unverschlüsseltes http lehnt der Code ab. |
 | Wird das Passwort gespeichert? | **Nein.** Nicht in einer Datei, nicht in den Einstellungen, nicht im Passwortspeicher, nicht in einem Protokoll. |
 | Bekommt es sonst jemand? | **Nein.** Nicht der Chatbot, nicht AIS.chat, nicht GitHub, nicht der Sync-Server, nicht die Entwickler. |
+| Und der Sync-Server? | Er bekommt deinen **Benutzernamen** und einen **aus dem Passwort gemachten Code**, nie das Passwort selbst (siehe unten). |
 | Was erfährt die App von Moodle? | Nur **„Anmeldung hat geklappt“** oder **„hat nicht geklappt“**. Sie liest keine Kurse, Noten, Nachrichten oder Namen. |
 | Bleibt eine Moodle-Sitzung offen? | **Nein.** Die App meldet sich direkt nach der Prüfung wieder bei Moodle ab. |
 | Was wird gespeichert? | Nur dein **Benutzername**, damit du ihn nächstes Mal nicht neu tippen musst. |
@@ -122,6 +140,22 @@ wenn du dich auf der Moodle-Webseite anmeldest.
 Danach ist das Passwort vergessen. Das Textfeld wird geleert, sobald du auf **Anmelden**
 drückst, und die Prüfung wirft ihre Kopie weg, wenn sie fertig ist.
 
+## Der Sync-Server
+
+Wenn ein Sync-Server eingerichtet ist (*Einstellungen → Konto*), meldet dich die App dort auch
+an, mit deinem Schul-Benutzernamen. So sind deine Chats ohne zweites Passwort auf jedem
+Computer. Der Sync-Server bekommt dein Passwort **nicht**. Nach einer erfolgreichen
+Moodle-Anmeldung macht die App aus Benutzername und Passwort mit **Argon2id** einen Code
+(Funktion `sync_code` in `src/moodle_login.rs`) und schickt nur diesen Code.
+
+- Derselbe Name und dasselbe Passwort ergeben immer denselben Code, deshalb klappt es auf
+  jedem Computer.
+- Aus dem Code lässt sich das Passwort nicht zurückrechnen. Argon2id ist außerdem absichtlich
+  langsam, sodass Raten, welches Passwort denselben Code ergibt, sehr lange dauert.
+- Der Code liegt nur im Arbeitsspeicher, solange die App läuft, und wird nie gespeichert.
+- Wenn du dein Schulpasswort änderst, ändert sich auch der Code. Das Sync-Konto muss dann
+  einmal im Dashboard des Servers gelöscht werden; die App legt es neu an.
+
 ## Selbst nachprüfen
 
 Die ganze Prüfung steht in einer Datei: [`src/moodle_login.rs`](../src/moodle_login.rs). Sie
@@ -133,8 +167,9 @@ Wo das Passwort im Code vorkommt:
 | Datei | Stelle | Was passiert |
 |---|---|---|
 | `src/app.rs` | Feld `school_login_password` | hält, was du ins Passwortfeld tippst |
-| `src/app.rs` | Funktion `start_school_login` | nimmt das Passwort aus dem Feld (das Feld ist wieder leer) und gibt es an die Prüfung |
+| `src/app.rs` | Funktion `start_school_login` | nimmt das Passwort aus dem Feld (das Feld ist wieder leer) und gibt es an die Prüfung und, wenn Moodle es angenommen hat, an `sync_code` |
 | `src/moodle_login.rs` | Funktion `check_login` → `try_login` | setzt es in das Anmeldeformular für moodle.ohg-goe.net (Schritt 2) |
+| `src/moodle_login.rs` | Funktion `sync_code` | macht daraus den Code für den Sync-Server (erst nachdem Moodle es angenommen hat) |
 
 Mehr nicht. Du kannst das nachprüfen, indem du im Code nach `school_login_password` und
 `check_login` suchst. Die Adresse, die tatsächlich aufgerufen wird, steht in `src/moodle_login.rs`

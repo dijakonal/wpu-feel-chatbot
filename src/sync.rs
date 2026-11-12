@@ -329,6 +329,28 @@ pub fn login(server: &str, user: &str, password: &str, create: bool) -> Result<(
     Ok((token.to_string(), v["username"].as_str().unwrap_or(user).to_string()))
 }
 
+/// Log in with the school account: the school user name and the code made from the school
+/// password (`moodle_login::sync_code`). The account is created on first use.
+pub fn login_with_school_account(server: &str, school_user: &str, code: &str) -> Result<(String, String)> {
+    let user = school_user.trim().to_lowercase();
+    let usable = (3..=32).contains(&user.chars().count())
+        && user.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
+    if !usable {
+        bail!("Your school user name cannot be used on the sync server. Log in there with your own name and password.");
+    }
+    match login(server, &user, code, false) {
+        Ok(ok) => Ok(ok),
+        Err(_) => match login(server, &user, code, true) {
+            Ok(ok) => Ok(ok),
+            Err(e) if e.to_string().contains("taken") => bail!(
+                "The name {user} is already used on the sync server with another password (maybe your school password changed). \
+                 Ask the person who runs the server to delete that account in the dashboard."
+            ),
+            Err(e) => Err(e),
+        },
+    }
+}
+
 /// Make the token useless on the server (errors do not matter: the app forgets it anyway).
 pub fn logout(server: &str, token: &str) {
     if let Ok(c) = client() {
@@ -546,6 +568,27 @@ mod tests {
         assert!(failure(401, "").downcast_ref::<Unauthorized>().is_some());
         assert_eq!(failure(422, r#"{"error":"At most 1000 items"}"#).to_string(), "At most 1000 items");
         assert!(failure(404, "<html>").to_string().contains("not a sync server"));
+    }
+
+    /// Against a running server: `SYNC_TEST_SERVER=http://localhost:8787 cargo test -- --ignored school_account`
+    #[test]
+    #[ignore]
+    fn school_account_login() {
+        let server = std::env::var("SYNC_TEST_SERVER").expect("SYNC_TEST_SERVER");
+        let name = format!("Schueler{}", crate::conversations::now() % 1_000_000);
+        let code = crate::moodle_login::sync_code(&name, "school-password");
+        // first computer: the account does not exist yet and is created
+        let (first, user) = login_with_school_account(&server, &name, &code).expect("create");
+        assert_eq!(user, name.to_lowercase());
+        // second computer, same school login: same account
+        let (second, _) = login_with_school_account(&server, &name, &crate::moodle_login::sync_code(&name, "school-password")).expect("login");
+        assert_ne!(first, second);
+        // the school password itself does not work as the sync password
+        assert!(login(&server, &name, "school-password", false).is_err());
+        // a changed school password gives another code: refused with an explanation
+        let err = login_with_school_account(&server, &name, &crate::moodle_login::sync_code(&name, "new-password")).unwrap_err();
+        assert!(err.to_string().contains("already used"), "{err}");
+        assert!(login_with_school_account(&server, "max@school", &code).unwrap_err().to_string().contains("cannot be used"));
     }
 
     /// Against a running server: `SYNC_TEST_SERVER=http://localhost:8787 cargo test -- --ignored sync_server`

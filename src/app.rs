@@ -50,7 +50,7 @@ enum Msg {
     /// The bot translated its greeting (`None`: it did not work).
     GreetingTranslated { lang: String, source: String, text: Option<String> },
     /// The school login was checked at Moodle (see `moodle_login.rs`).
-    SchoolLoginChecked { username: String, result: crate::moodle_login::LoginResult },
+    SchoolLoginChecked { username: String, result: crate::moodle_login::LoginResult, sync_code: Option<String> },
     /// Logging in to the sync server finished: `(server, token, user name)`.
     LoggedIn(Result<(String, String, String), String>),
     /// A sync finished: the new revision and the changes from elsewhere, or
@@ -108,6 +108,11 @@ pub struct App {
     /// Only held while typing; handed to the check and then gone (never saved).
     school_login_password: String,
     school_login_error: Option<&'static str>,
+    /// The code for the sync server made from the school password (`moodle_login::sync_code`);
+    /// only in memory, for this run.
+    school_sync_code: Option<String>,
+    /// Logging in to the sync server with the school account was tried in this run.
+    school_sync_tried: bool,
 
     // ---- account on the sync server
     sync_state: crate::sync::SyncState,
@@ -186,6 +191,8 @@ impl App {
             school_login_user: moodle_user,
             school_login_password: String::new(),
             school_login_error: None,
+            school_sync_code: None,
+            school_sync_tried: false,
             sync_state: crate::sync::SyncState::load(),
             sync_in_flight: None,
             next_sync: std::cell::Cell::new(0.0),
@@ -635,6 +642,37 @@ impl App {
         self.next_sync.set(f64::INFINITY);
     }
 
+    /// After the school login: log in to the sync server with the school account, if a server
+    /// is set up and nobody is logged in there yet. Once per run.
+    fn school_sync_login(&mut self) {
+        // the saved sync login must have been read first (it may already be logged in)
+        if self.school_sync_tried || self.school_sync_code.is_none() || !crate::secret::loaded() {
+            return;
+        }
+        if self.settings.sync_server.trim().is_empty() || self.settings.sync_ready() || self.logging_in {
+            return;
+        }
+        self.school_sync_tried = true;
+        let server = self.settings.sync_server.trim().to_string();
+        self.start_school_sync_login(server);
+    }
+
+    fn start_school_sync_login(&mut self, server: String) {
+        let Some(code) = self.school_sync_code.clone() else { return };
+        let user = self.settings.moodle_user.clone();
+        self.logging_in = true;
+        self.sync_note = None;
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::sync::login_with_school_account(&server, &user, &code)
+                .map(|(token, name)| (server, token, name))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::LoggedIn(result));
+            ctx.request_repaint();
+        });
+    }
+
     fn start_login(&mut self, create: bool) {
         let server = match crate::sync::normalize_server(&self.draft.sync_server) {
             Ok(s) => s,
@@ -794,7 +832,8 @@ impl App {
                         };
                     }
                 }
-                Msg::SchoolLoginChecked { username, result } => {
+                Msg::SchoolLoginChecked { username, result, sync_code } => {
+                    self.school_sync_code = sync_code;
                     use crate::moodle_login::LoginResult;
                     self.school_login_checking = false;
                     match result {
@@ -1675,8 +1714,10 @@ impl App {
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let result = crate::moodle_login::check_login(&username, &password);
+            // for the sync server: a code made from the password, not the password itself
+            let sync_code = (result == crate::moodle_login::LoginResult::Accepted).then(|| crate::moodle_login::sync_code(&username, &password));
             drop(password); // not needed any more
-            let _ = tx.send(Msg::SchoolLoginChecked { username, result });
+            let _ = tx.send(Msg::SchoolLoginChecked { username, result, sync_code });
             ctx.request_repaint();
         });
     }
@@ -1730,6 +1771,20 @@ impl App {
 
         ui.label(RichText::new(t("Log in to keep your chats on a server and continue them on any computer.")).small().color(p.weak));
         ui.add_space(4.0);
+        // the school account (from the start screen) works without typing anything
+        if self.school_sync_code.is_some() && !self.settings.moodle_user.is_empty() {
+            let label = tf("Log in as {0} (school account)", &[&self.settings.moodle_user]);
+            let button = theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(!self.logging_in);
+            if ui.add(button).clicked() {
+                match crate::sync::normalize_server(&self.draft.sync_server) {
+                    Ok(server) => self.start_school_sync_login(server),
+                    Err(e) => self.sync_note = Some((false, e.to_string())),
+                }
+            }
+            ui.label(RichText::new(t("Uses your school login. Your password is not sent to the sync server.")).small().color(p.weak));
+            ui.add_space(6.0);
+            ui.label(RichText::new(t("Or with a separate account:")).small().color(p.weak));
+        }
         let mut submit = false;
         egui::Grid::new("account").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             ui.label(t("Server address"));
@@ -3295,6 +3350,7 @@ impl eframe::App for App {
         }
 
         self.summarise_titles();
+        self.school_sync_login();
         self.sync_tick(ctx);
 
         // text captured by the Reply button last frame

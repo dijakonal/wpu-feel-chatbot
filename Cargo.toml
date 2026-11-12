@@ -1,6 +1,6 @@
 [package]
 name = "ais-chat-client"
-version = "1.2.3"
+version = "1.2.4"
 edition = "2021"
 description = "Small native desktop chat client for a shared AIS.chat character"
 repository = "https://github.com/dijakonal/wpu-feel-chatbot"
@@ -25,6 +25,7 @@ assets = [
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "5"
 eframe = "0.29"
