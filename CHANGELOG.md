@@ -7,6 +7,7 @@
   speaks plain http. Addresses in the same network (`192.168.…`, `10.…`,
   `laptop.local`, …) now use http. When the server cannot be reached, the app says
   why: wrong address, server not running, firewall, or https/http mixed up.
+
 ## 1.2.0 – 2026-11-12
 
 - **Nicer account display:** the bottom of the chat list is now a small account
