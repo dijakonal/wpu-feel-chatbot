@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 – 2026-11-12
 
 - **Nicer account display:** the bottom of the chat list is now a small account
   card with your name, the sync state and a credit bar that turns orange when
