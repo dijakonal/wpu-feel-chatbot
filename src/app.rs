@@ -1706,8 +1706,9 @@ impl App {
         ui.add_space(4.0);
         let mut submit = false;
         egui::Grid::new("account").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-            ui.label(t("Server"));
-            ui.add(egui::TextEdit::singleline(&mut self.draft.sync_server).hint_text("https://…").desired_width(300.0));
+            ui.label(t("Server address"));
+            ui.add(egui::TextEdit::singleline(&mut self.draft.sync_server).hint_text("192.168.1.20:8787").desired_width(300.0))
+                .on_hover_text(t("The address the sync server prints when it starts."));
             ui.end_row();
             ui.label(t("User name"));
             ui.add(egui::TextEdit::singleline(&mut self.draft.sync_user).desired_width(300.0));

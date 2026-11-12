@@ -205,8 +205,12 @@ fn client() -> Result<Client> {
         .build()?)
 }
 
-/// `https://host` without a trailing slash; `host:port` alone means https (http for
-/// localhost).
+/// The server address with `http://` or `https://` and without a trailing slash.
+///
+/// Without one, a computer in the same network (`localhost`, `192.168.…`, `10.…`,
+/// `laptop.local`, a name without dots) gets `http://` – that is how the server runs when
+/// started on a laptop. Anything else (`sync.school.example`) gets `https://`, because on the
+/// internet the server belongs behind https.
 pub fn normalize_server(input: &str) -> Result<String> {
     let t = input.trim().trim_end_matches('/');
     if t.is_empty() {
@@ -214,16 +218,31 @@ pub fn normalize_server(input: &str) -> Result<String> {
     }
     let with_scheme = if t.starts_with("http://") || t.starts_with("https://") {
         t.to_string()
-    } else if t.starts_with("localhost") || t.starts_with("127.0.0.1") {
-        format!("http://{t}")
     } else {
-        format!("https://{t}")
+        let host = url::Url::parse(&format!("http://{t}")).ok().and_then(|u| u.host().map(|h| h.to_owned()));
+        match host {
+            Some(h) if is_local(&h) => format!("http://{t}"),
+            _ => format!("https://{t}"),
+        }
     };
     let url = url::Url::parse(&with_scheme).map_err(|_| anyhow!("That is not a server address."))?;
     if url.host_str().is_none() {
         bail!("That is not a server address.");
     }
     Ok(with_scheme)
+}
+
+/// A computer in the same (home or school) network, or this one.
+fn is_local(host: &url::Host) -> bool {
+    match host {
+        url::Host::Ipv4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        // fc00::/7 = addresses that only exist inside a network
+        url::Host::Ipv6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+        url::Host::Domain(name) => {
+            let name = name.to_lowercase();
+            name == "localhost" || !name.contains('.') || [".local", ".lan", ".home", ".internal", ".fritz.box"].iter().any(|e| name.ends_with(e))
+        }
+    }
 }
 
 /// Plain http to another computer sends the password readable for everyone on the way.
@@ -255,11 +274,33 @@ impl std::fmt::Display for Unauthorized {
 
 impl std::error::Error for Unauthorized {}
 
+/// Why the server could not be reached, in words that say what to do.
 fn unreachable(e: reqwest::Error) -> anyhow::Error {
-    if e.is_timeout() {
-        anyhow!("The sync server does not answer.")
+    let https = e.url().is_some_and(|u| u.scheme() == "https");
+    let address = e.url().map(|u| format!("{}:{}", u.host_str().unwrap_or(""), u.port_or_known_default().unwrap_or(0))).unwrap_or_default();
+    anyhow!(explain_unreachable(&format!("{e:?}"), e.is_timeout(), https, &address))
+}
+
+fn explain_unreachable(details: &str, timeout: bool, https: bool, address: &str) -> String {
+    let d = details.to_lowercase();
+    if d.contains("dns error") {
+        format!("The address {address} was not found. Check how it is spelled.")
+    } else if d.contains("connectionrefused") || d.contains("connection refused") {
+        format!(
+            "Nothing answers at {address}. Is the sync server running there, and is the port right? \
+             (The server prints its address when it starts.)"
+        )
+    } else if https && (d.contains("connectionreset") || d.contains("corrupt message") || d.contains("invalidcontenttype") || d.contains("handshake")) {
+        "This server does not use https. Write the address with http:// in front, e.g. http://192.168.1.20:8787.".to_string()
+    } else if timeout || d.contains("timed out") {
+        format!(
+            "The sync server at {address} does not answer. If it runs on another computer, its firewall may block the \
+             port – allow the server there, or check that both computers are in the same network."
+        )
+    } else if d.contains("certificate") {
+        "The server's https certificate is not valid.".to_string()
     } else {
-        anyhow!("Could not reach the sync server. Check the address and the internet connection.")
+        "Could not reach the sync server. Check the address and the internet connection.".to_string()
     }
 }
 
@@ -457,6 +498,19 @@ mod tests {
         assert_eq!(normalize_server(" sync.example.org/ ").unwrap(), "https://sync.example.org");
         assert_eq!(normalize_server("localhost:8787").unwrap(), "http://localhost:8787");
         assert_eq!(normalize_server("http://10.0.0.5:8787").unwrap(), "http://10.0.0.5:8787");
+        // computers in the same network: plain http, as the server runs there
+        for (typed, expected) in [
+            ("192.168.1.20:8787", "http://192.168.1.20:8787"),
+            ("10.0.0.5:8787", "http://10.0.0.5:8787"),
+            ("172.20.1.4:8787", "http://172.20.1.4:8787"),
+            ("laptop:8787", "http://laptop:8787"),
+            ("lenas-laptop.local:8787", "http://lenas-laptop.local:8787"),
+            ("[::1]:8787", "http://[::1]:8787"),
+            ("8.8.8.8:8787", "https://8.8.8.8:8787"),
+            ("https://192.168.1.20:8787", "https://192.168.1.20:8787"),
+        ] {
+            assert_eq!(normalize_server(typed).unwrap(), expected, "{typed}");
+        }
         assert!(normalize_server("").is_err());
         assert!(is_insecure("http://10.0.0.5:8787"));
         assert!(!is_insecure("http://localhost:8787"));
@@ -474,6 +528,17 @@ mod tests {
         assert_eq!(read_spend(404, "").unwrap(), Spend::NoCredits, "an older server");
         assert!(read_spend(401, "").unwrap_err().downcast_ref::<Unauthorized>().is_some());
         assert!(read_spend(500, "").is_err());
+    }
+
+    #[test]
+    fn explains_why_the_server_is_unreachable() {
+        let reset = r#"source: hyper_util::client::legacy::Error(Connect, Os { code: 104, kind: ConnectionReset, message: "Connection reset by peer" })"#;
+        assert!(explain_unreachable(reset, false, true, "192.168.1.20:8787").contains("http://"), "https to an http server");
+        let refused = r#"ConnectError("tcp connect error", 127.0.0.1:9, Os { code: 111, kind: ConnectionRefused })"#;
+        assert!(explain_unreachable(refused, false, false, "127.0.0.1:9").starts_with("Nothing answers at 127.0.0.1:9"));
+        let dns = r#"ConnectError("dns error", Custom { error: "Name or service not known" })"#;
+        assert!(explain_unreachable(dns, false, false, "sync.exampel.org:443").contains("was not found"));
+        assert!(explain_unreachable("operation timed out", true, false, "192.168.1.20:8787").contains("firewall"));
     }
 
     #[test]
