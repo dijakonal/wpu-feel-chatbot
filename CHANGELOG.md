@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+Every commit raises the last number of the version (in `Cargo.toml`) and is listed here.
 
+## 1.2.1 – 2026-11-12
+
+- **Changelog:** from now on every change gets its own version number and an entry
+  here.
 - **Fixed: could not connect to a sync server on another computer.** An address
   like `192.168.1.20:8787` was opened with https, but a server started on a laptop
   speaks plain http. Addresses in the same network (`192.168.…`, `10.…`,
