@@ -2,6 +2,10 @@
 
 Every commit raises the last number of the version (in `Cargo.toml`) and is listed here.
 
+## 1.2.2 – 2026-11-12
+
+- Removed `CLAUDE.md` (notes for the AI assistant) again.
+
 ## 1.2.1 – 2026-11-12
 
 - **Changelog:** from now on every change gets its own version number and an entry
