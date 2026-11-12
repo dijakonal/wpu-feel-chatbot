@@ -1,6 +1,6 @@
 [package]
 name = "ais-chat-client"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2021"
 description = "Small native desktop chat client for a shared AIS.chat character"
 repository = "https://github.com/dijakonal/wpu-feel-chatbot"
