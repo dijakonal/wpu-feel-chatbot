@@ -426,6 +426,9 @@ impl Settings {
         let mut on_disk = self.clone();
         let mut to_store = Vec::new();
         for (name, value) in self.secrets() {
+            if !crate::secret::should_store(&value, crate::secret::loaded()) {
+                continue;
+            }
             match crate::secret::status(&name, &value) {
                 crate::secret::Status::Stored => on_disk.forget_secret(&name, &value),
                 crate::secret::Status::Unknown => to_store.push((name, value)),
@@ -449,6 +452,29 @@ impl Settings {
             });
         }
         Ok(())
+    }
+
+    /// Take what connecting to AIS.chat finds out (invite link, request values, the bot's
+    /// name, greeting and instructions) – and nothing else, so tokens, keys and choices made
+    /// meanwhile are kept.
+    pub fn take_connection_from(&mut self, found: &Settings) {
+        self.invite_link = found.invite_link.clone();
+        self.base_url = found.base_url.clone();
+        self.character_id = found.character_id.clone();
+        self.invite_code = found.invite_code.clone();
+        self.next_action = found.next_action.clone();
+        self.deployment_id = found.deployment_id.clone();
+        self.character_name = found.character_name.clone();
+        self.greeting = found.greeting.clone();
+        self.character_instructions = found.character_instructions.clone();
+    }
+
+    /// Use the secrets of `current` (for settings that were copied before the secrets were
+    /// read, or before the user changed one).
+    pub fn keep_secrets_of(&mut self, current: &Settings) {
+        self.github_token = current.github_token.clone();
+        self.ai_keys = current.ai_keys.clone();
+        self.sync_token = current.sync_token.clone();
     }
 
     /// Logged in to a sync server.
@@ -577,6 +603,30 @@ mod tests {
         assert!(fresh.sync_ready());
         fresh.forget_secret("sync-token", "tok");
         assert!(!fresh.sync_ready() && fresh.github_token == "ghp2");
+    }
+
+    #[test]
+    fn reconnecting_keeps_tokens_and_choices() {
+        let mut current = Settings { github_token: "ghp".into(), sync_token: "tok".into(), language: "de".into(), model: "m".into(), ..Default::default() };
+        current.ai_keys.insert("groq".into(), "gsk".into());
+        // what a reconnect started before the secrets were read hands back
+        let found = Settings { next_action: "new".into(), character_name: "Bot".into(), greeting: "Hi".into(), ..Default::default() };
+        let mut next = current.clone();
+        next.take_connection_from(&found);
+        assert_eq!((next.next_action.as_str(), next.character_name.as_str()), ("new", "Bot"));
+        assert_eq!((next.github_token.as_str(), next.sync_token.as_str(), next.ai_key()), ("ghp", "tok", "gsk".to_string()));
+        assert_eq!((next.language.as_str(), next.model.as_str()), ("de", "m"), "choices made meanwhile stay");
+
+        let mut from_form = found.clone();
+        from_form.keep_secrets_of(&current);
+        assert_eq!((from_form.github_token.as_str(), from_form.ai_key()), ("ghp", "gsk".to_string()));
+    }
+
+    #[test]
+    fn empty_secrets_are_only_deleted_after_reading_them() {
+        assert!(!crate::secret::should_store("", false), "not read yet: keep what is stored");
+        assert!(crate::secret::should_store("", true), "read, then cleared by the user: delete");
+        assert!(crate::secret::should_store("ghp", false));
     }
 
     #[test]

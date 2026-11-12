@@ -23,6 +23,25 @@ fn failed() -> &'static Mutex<HashMap<String, String>> {
     FAILED.get_or_init(Default::default)
 }
 
+/// Set once the secrets saved earlier were read at start and handed to the settings. Until
+/// then an empty value in the settings only means "not read yet", not "removed".
+static LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn mark_loaded() {
+    LOADED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn loaded() -> bool {
+    LOADED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Whether saving the settings should write `value` to the store: an empty value deletes the
+/// stored one, which is only right once the stored secrets were read (otherwise the empty
+/// value just means they have not arrived yet – deleting them then lost the user's tokens).
+pub fn should_store(value: &str, loaded: bool) -> bool {
+    !value.is_empty() || loaded
+}
+
 /// Save `value` under `name` (an empty value removes it). Can block like [`load`].
 pub fn store(name: &str, value: &str) -> Result<()> {
     let same = |m: &Mutex<HashMap<String, String>>| m.lock().map(|k| k.get(name).map(String::as_str) == Some(value)).unwrap_or(false);

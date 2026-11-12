@@ -177,21 +177,34 @@ pub fn push(cfg: &Config, files: &[FileOut], commit_message: &str) -> Result<Str
         Err(()) => return push_to_empty_repo(&api, files, commit_message, &branch),
     };
 
-    let (status, v) = api.get(&format!("/git/commits/{head}"))?;
-    let base_tree = v["tree"]["sha"].as_str().filter(|_| status == 200).ok_or_else(|| anyhow!("Could not read the latest commit (HTTP {status})."))?;
+    // If someone else pushed to the branch between reading it and moving it, GitHub refuses
+    // ("not a fast forward"): then build the commit again on top of the new state.
+    let mut head = head;
+    let mut attempt = 0;
+    loop {
+        let (status, v) = api.get(&format!("/git/commits/{head}"))?;
+        let base_tree = v["tree"]["sha"].as_str().filter(|_| status == 200).ok_or_else(|| anyhow!("Could not read the latest commit (HTTP {status})."))?;
 
-    let tree: Vec<Value> = files.iter().map(|f| json!({"path": f.path, "mode": "100644", "type": "blob", "content": f.content})).collect();
-    let (status, v) = api.send(reqwest::Method::POST, "/git/trees", json!({"base_tree": base_tree, "tree": tree}))?;
-    let tree_sha = v["sha"].as_str().filter(|_| status == 201).ok_or_else(|| write_error("save the files", status, &v))?;
+        let tree: Vec<Value> = files.iter().map(|f| json!({"path": f.path, "mode": "100644", "type": "blob", "content": f.content})).collect();
+        let (status, v) = api.send(reqwest::Method::POST, "/git/trees", json!({"base_tree": base_tree, "tree": tree}))?;
+        let tree_sha = v["sha"].as_str().filter(|_| status == 201).ok_or_else(|| write_error("save the files", status, &v))?;
 
-    let (status, v) = api.send(reqwest::Method::POST, "/git/commits", json!({"message": commit_message, "tree": tree_sha, "parents": [head]}))?;
-    let commit = v["sha"].as_str().filter(|_| status == 201).ok_or_else(|| write_error("create the commit", status, &v))?.to_string();
+        let (status, v) = api.send(reqwest::Method::POST, "/git/commits", json!({"message": commit_message, "tree": tree_sha, "parents": [head]}))?;
+        let commit = v["sha"].as_str().filter(|_| status == 201).ok_or_else(|| write_error("create the commit", status, &v))?.to_string();
 
-    let (status, v) = api.send(reqwest::Method::PATCH, &format!("/git/refs/heads/{branch}"), json!({"sha": commit, "force": false}))?;
-    if status != 200 {
-        return Err(write_error(&format!("move branch {branch}"), status, &v));
+        let (status, v) = api.send(reqwest::Method::PATCH, &format!("/git/refs/heads/{branch}"), json!({"sha": commit, "force": false}))?;
+        if status == 200 {
+            return Ok(commit_url(&api, &commit));
+        }
+        attempt += 1;
+        if !matches!(status, 409 | 422) || attempt >= 3 {
+            return Err(write_error(&format!("move branch {branch}"), status, &v));
+        }
+        head = match api.branch_head(&branch)? {
+            Ok(Some(sha)) => sha,
+            _ => return Err(write_error(&format!("move branch {branch}"), status, &v)),
+        };
     }
-    Ok(commit_url(&api, &commit))
 }
 
 /// An empty repository has nothing to build a tree on; the Contents API can create the first
@@ -539,6 +552,7 @@ mod tests {
         let addr = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let mut used = std::collections::HashMap::new();
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -561,11 +575,14 @@ mod tests {
                 reader.read_exact(&mut body).unwrap();
                 let mut parts = first.split_whitespace();
                 let (method, path) = (parts.next().unwrap().to_string(), parts.next().unwrap().to_string());
-                let (status, reply) = routes
-                    .iter()
-                    .find(|(m, p, _, _)| *m == method && *p == path)
-                    .map(|(_, _, s, b)| (*s, *b))
+                // a route listed more than once answers with each in turn; the last one stays
+                let matching: Vec<usize> = (0..routes.len()).filter(|&i| routes[i].0 == method && routes[i].1 == path).collect();
+                let turn = used.entry((method.clone(), path.clone())).or_insert(0usize);
+                let (status, reply) = matching
+                    .get((*turn).min(matching.len().saturating_sub(1)))
+                    .map(|&i| (routes[i].2, routes[i].3))
                     .unwrap_or((404, r#"{"message":"Not Found"}"#));
+                *turn += 1;
                 let _ = tx.send((method, path, String::from_utf8_lossy(&body).to_string()));
                 let resp = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
                 let _ = stream.write_all(resp.as_bytes());
@@ -606,6 +623,46 @@ mod tests {
         let r#ref: Value = serde_json::from_str(&log[5].2).unwrap();
         assert_eq!(r#ref["sha"], "c2");
         assert_eq!(r#ref["force"], false);
+    }
+
+    #[test]
+    fn builds_again_when_the_branch_moved_meanwhile() {
+        let (api, rx) = mock(vec![
+            ("GET", "/repos/o/r", 200, r#"{"default_branch":"main","permissions":{"push":true}}"#),
+            ("GET", "/repos/o/r/git/ref/heads/main", 200, r#"{"object":{"sha":"c1"}}"#),
+            ("GET", "/repos/o/r/git/ref/heads/main", 200, r#"{"object":{"sha":"c9"}}"#),
+            ("GET", "/repos/o/r/git/commits/c1", 200, r#"{"tree":{"sha":"t1"}}"#),
+            ("GET", "/repos/o/r/git/commits/c9", 200, r#"{"tree":{"sha":"t9"}}"#),
+            ("POST", "/repos/o/r/git/trees", 201, r#"{"sha":"t2"}"#),
+            ("POST", "/repos/o/r/git/commits", 201, r#"{"sha":"c2"}"#),
+            ("POST", "/repos/o/r/git/commits", 201, r#"{"sha":"c10"}"#),
+            ("PATCH", "/repos/o/r/git/refs/heads/main", 422, r#"{"message":"Update is not a fast forward"}"#),
+            ("PATCH", "/repos/o/r/git/refs/heads/main", 200, r#"{}"#),
+        ]);
+        let files = vec![FileOut { path: "main.py".into(), content: "print(1)\n".into(), unnamed: None }];
+        let url = push(&cfg(&api, ""), &files, "msg").unwrap();
+        assert!(url.ends_with("/o/r/commit/c10"), "{url}");
+        let log: Vec<(String, String, String)> = rx.try_iter().collect();
+        let commits: Vec<Value> = log.iter().filter(|(m, p, _)| m == "POST" && p.ends_with("/git/commits")).map(|(_, _, b)| serde_json::from_str(b).unwrap()).collect();
+        assert_eq!(commits[0]["parents"], json!(["c1"]));
+        assert_eq!(commits[1]["parents"], json!(["c9"]), "built again on the new state");
+        let trees: Vec<Value> = log.iter().filter(|(m, p, _)| m == "POST" && p.ends_with("/git/trees")).map(|(_, _, b)| serde_json::from_str(b).unwrap()).collect();
+        assert_eq!(trees[1]["base_tree"], "t9");
+    }
+
+    #[test]
+    fn gives_up_after_three_tries() {
+        let (api, _rx) = mock(vec![
+            ("GET", "/repos/o/r", 200, r#"{"default_branch":"main","permissions":{"push":true}}"#),
+            ("GET", "/repos/o/r/git/ref/heads/main", 200, r#"{"object":{"sha":"c1"}}"#),
+            ("GET", "/repos/o/r/git/commits/c1", 200, r#"{"tree":{"sha":"t1"}}"#),
+            ("POST", "/repos/o/r/git/trees", 201, r#"{"sha":"t2"}"#),
+            ("POST", "/repos/o/r/git/commits", 201, r#"{"sha":"c2"}"#),
+            ("PATCH", "/repos/o/r/git/refs/heads/main", 422, r#"{"message":"Update is not a fast forward"}"#),
+        ]);
+        let files = vec![FileOut { path: "main.py".into(), content: "x".into(), unnamed: None }];
+        let err = push(&cfg(&api, ""), &files, "msg").unwrap_err().to_string();
+        assert!(err.contains("try again"), "{err}");
     }
 
     #[test]

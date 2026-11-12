@@ -2,6 +2,26 @@
 
 Every commit raises the last number of the version (in `Cargo.toml`) and is listed here.
 
+## 1.2.3 – 2026-11-12
+
+- **Fixed: GitHub token, API keys and the sync login disappeared after a restart.**
+  When the app started, it reconnected to the class chat with a copy of the settings
+  made before the saved tokens were read, and saving that copy deleted them from the
+  system password store. The app now only takes the chat's connection details from
+  that reconnect, and never deletes a saved token before it has read it. (Tokens that
+  were already lost have to be entered once more.)
+- **Fixed: changing the language or the model while an answer was coming in could
+  be undone** when the class chat reconnected in the middle of it.
+- **Saving to GitHub is more reliable:**
+  - Saves run one after another. Two at once – automatic saving and a click, or two
+    answers in a row – often failed with "the branch may have changed" or merged
+    into an old version of the file.
+  - If the branch changed on GitHub in the meantime (for example a push from
+    another computer), the app builds the commit again on top of it instead of
+    failing (up to three tries).
+  - Clicking **⬆ GitHub** without a token now says that the token is missing,
+    instead of doing nothing.
+
 ## 1.2.2 – 2026-11-12
 
 - Removed `CLAUDE.md` (notes for the AI assistant) again.

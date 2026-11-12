@@ -731,10 +731,21 @@ impl App {
                         self.connecting_from_settings = false;
                     }
                     match result {
-                        Ok((s, summary)) => {
-                            self.draft = s.clone();
-                            self.link_input = s.invite_link.clone();
-                            self.apply_settings(s);
+                        Ok((found, summary)) => {
+                            self.link_input = found.invite_link.clone();
+                            let next = if from_settings {
+                                // Connect in Settings: the form's values, with the current secrets
+                                let mut s = found.clone();
+                                s.keep_secrets_of(&self.settings);
+                                s
+                            } else {
+                                // at start: only what connecting found out
+                                let mut s = self.settings.clone();
+                                s.take_connection_from(&found);
+                                s
+                            };
+                            self.draft.take_connection_from(&found);
+                            self.apply_settings(next);
                             self.conn = Conn::Ready;
                             if from_settings {
                                 self.settings_note = Some((true, summary));
@@ -869,6 +880,8 @@ impl App {
                     if !had_key && !self.settings.ai_key().trim().is_empty() {
                         self.load_models();
                     }
+                    // the settings hold the stored secrets now, so saving cannot lose them
+                    crate::secret::mark_loaded();
                 }
                 Msg::ModelsLoaded(provider, result) => {
                     // an answer for a provider that is no longer selected is not used
@@ -920,7 +933,11 @@ impl App {
                         Err(e) => (false, e),
                     });
                 }
-                Msg::SettingsChanged(s) => {
+                Msg::SettingsChanged(found) => {
+                    // AIS.chat changed while answering: take its new request values only
+                    let mut s = self.settings.clone();
+                    s.take_connection_from(&found);
+                    self.draft.take_connection_from(&found);
                     self.apply_settings(s);
                     self.conn = Conn::Ready;
                 }
@@ -1232,6 +1249,15 @@ impl App {
     /// all its code blocks.
     fn push_code(&mut self, conv: &str, msg: &str, only: Option<usize>) {
         if !self.settings.github_ready() {
+            // a click on a block says why nothing happens; automatic saving just waits
+            if let Some(n) = only {
+                let why = if self.settings.github_token.trim().is_empty() {
+                    "The GitHub token is missing. Enter it in Settings → GitHub."
+                } else {
+                    "GitHub is not set up. Check Settings → GitHub."
+                };
+                self.push_states.insert(format!("{msg}#{n}"), PushState::Failed(why.to_string()));
+            }
             return;
         }
         let Some(ci) = self.convs.iter().position(|c| c.id == conv) else { return };
@@ -2681,6 +2707,10 @@ fn not_attachable(f: &github::RepoFile) -> Option<&'static str> {
 ///
 /// All in one commit. Returns the commit's address.
 fn save_to_github(s: &Settings, cfg: &github::Config, files: Vec<github::FileOut>, chat_title: &str) -> anyhow::Result<String> {
+    // One save at a time: two at once (automatic saving and a click, or two answers) read the
+    // same files and the same branch, and the second then failed or merged into old code.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let branch = github::target_branch(cfg)?;
     let folder = s.github_folder();
     let prefix = if folder.is_empty() { String::new() } else { format!("{folder}/") };
