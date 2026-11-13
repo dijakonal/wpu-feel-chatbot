@@ -2,6 +2,12 @@
 
 Every commit raises the last number of the version (in `Cargo.toml`) and is listed here.
 
+## 1.2.7 – 2026-11-13
+
+- **Open the dashboard** opens the dashboard's https address, now that the sync server
+  serves its dashboard over https (sync server 0.3.7). The browser may warn once about
+  the server's own certificate; the server shows its fingerprint to check it.
+
 ## 1.2.6 – 2026-11-13
 
 - **Open the dashboard:** if the server's owner gave your sync account dashboard

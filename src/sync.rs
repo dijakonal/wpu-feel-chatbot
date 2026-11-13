@@ -420,6 +420,10 @@ pub fn dashboard_login(server: &str, token: &str) -> Result<String> {
         return Err(failure(status, &text));
     }
     let v: Value = serde_json::from_str(&text).map_err(|_| anyhow!("Unexpected answer from the sync server."))?;
+    // newer servers say where the dashboard is (its https address); older ones serve it here
+    if let Some(url) = v["url"].as_str() {
+        return Ok(url.to_string());
+    }
     let login = v["token"].as_str().ok_or_else(|| anyhow!("Unexpected answer from the sync server."))?;
     Ok(format!("{server}/admin#login={login}"))
 }
