@@ -31,10 +31,15 @@ To build it yourself, see [Build & run](#build--run).
 
 ## Using it
 
-**First, log in with your school account.** When the app starts, it asks for your Moodle
-user name and password of the school and checks them at https://moodle.ohg-goe.net. The
-password is only sent there, is never saved, and the app logs out of Moodle again right after
-the check. What exactly happens, in English and German:
+**First, choose how to log in.** When the app starts, it offers three ways:
+
+- **OHG network** – your Moodle login of the school, checked at https://moodle.ohg-goe.net;
+- **moin.schule** – the school login of Lower Saxony, checked at https://auth.moin.schule;
+- **Continue without an account** – only the class bot, and chatting needs an approved account
+  on a sync server; no GitHub, no free AI models, no other bots, no advanced settings.
+
+The password is only sent to the place you chose, is never saved, and the app logs out there
+again right after the check. What exactly happens, in English and German:
 [docs/MOODLE-LOGIN.md](docs/MOODLE-LOGIN.md).
 
 1. Start the app. It connects to the class chat by itself ("Online" with a green
@@ -282,6 +287,7 @@ Without a tag push: on GitHub open **Actions → Build → Run workflow**, tick
 | `src/ui_text.rs` | the translations of every menu text |
 | `src/backend.rs` | sends requests to AIS.chat or to a free AI model |
 | `src/models.rs` | free AI providers (OpenAI-style API): model lists, streaming chat |
+| `src/moin_login.rs` | the moin.schule login check at auth.moin.schule (explained in `docs/MOODLE-LOGIN.md`) |
 | `src/moodle_login.rs` | the school login check at moodle.ohg-goe.net (explained in `docs/MOODLE-LOGIN.md`) |
 | `src/settings.rs` | invite-link parsing, cURL import, loading/saving settings |
 | `src/sync.rs` | account login and chat sync with the sync server |

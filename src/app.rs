@@ -50,12 +50,15 @@ enum Msg {
     /// The bot translated its greeting (`None`: it did not work).
     GreetingTranslated { lang: String, source: String, text: Option<String> },
     /// The school login was checked at Moodle (see `moodle_login.rs`).
-    SchoolLoginChecked { username: String, result: crate::moodle_login::LoginResult, sync_code: Option<String> },
+    /// `method` is "moodle" or "moin"; `sync_user` and `sync_code` are what the sync server
+    /// gets instead of the school login (only after a successful check).
+    SchoolLoginChecked { method: &'static str, username: String, result: crate::moodle_login::LoginResult, sync_user: String, sync_code: Option<String> },
     /// Logging in to the sync server finished: `(server, token, user name)`.
-    LoggedIn(Result<(String, String, String), String>),
+    LoggedIn(Result<(String, String, String, bool), String>),
     /// A sync finished: the new revision and the changes from elsewhere, or
     /// `(login no longer valid, message)`.
-    Synced(Result<(i64, Vec<crate::sync::Item>, Option<crate::sync::Credits>), (bool, String)>),
+    /// `(login no longer valid, account waits for approval, message)` on failure.
+    Synced(Result<(i64, Vec<crate::sync::Item>, Option<crate::sync::Credits>), (bool, bool, String)>),
     /// The server said where the account's credits stand.
     Credits(crate::sync::Credits),
     /// The bot summarised the first message of a chat (`None`: it did not work).
@@ -111,6 +114,15 @@ pub struct App {
     /// The code for the sync server made from the school password (`moodle_login::sync_code`);
     /// only in memory, for this run.
     school_sync_code: Option<String>,
+    /// The name the sync server knows the school account by.
+    school_sync_user: String,
+    /// How this run was unlocked: "moodle", "moin" (a school login) or "none" (continued
+    /// without an account – see `guest`).
+    login_method: &'static str,
+    /// The choice on the start screen.
+    login_choice: &'static str,
+    /// The sync account exists but waits for approval by the person running the server.
+    sync_pending: bool,
     /// Logging in to the sync server with the school account was tried in this run.
     school_sync_tried: bool,
 
@@ -166,7 +178,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         let settings = Settings::load();
-        let moodle_user = settings.moodle_user.clone();
+        let moodle_user = if settings.login_method == "moin" { settings.moin_user.clone() } else { settings.moodle_user.clone() };
+        let login_choice = if settings.login_method == "moin" { "moin" } else { "moodle" };
         theme::set_appearance(&cc.egui_ctx, &settings.appearance);
         let (tx, rx) = channel();
         let mut app = Self {
@@ -192,6 +205,10 @@ impl App {
             school_login_password: String::new(),
             school_login_error: None,
             school_sync_code: None,
+            school_sync_user: String::new(),
+            login_method: "moodle",
+            login_choice,
+            sync_pending: false,
             school_sync_tried: false,
             sync_state: crate::sync::SyncState::load(),
             sync_in_flight: None,
@@ -314,8 +331,25 @@ impl App {
         }
     }
 
+    /// Without a school login the chat needs an approved account on a sync server.
+    fn chat_allowed(&self) -> bool {
+        !self.guest() || (self.settings.sync_ready() && !self.sync_pending)
+    }
+
+    /// Continued without an account: only the class bot, no GitHub, no other bots, no
+    /// advanced settings.
+    fn guest(&self) -> bool {
+        self.login_method == "none"
+    }
+
+    /// GitHub saving and reading – only with a school login.
+    fn github_on(&self) -> bool {
+        !self.guest() && self.settings.github_ready()
+    }
+
     fn can_send(&self) -> bool {
-        !self.busy
+        self.chat_allowed()
+            && !self.busy
             && !self.pending.iter().any(|f| matches!(f.state, FileState::Uploading))
             && (!self.input.trim().is_empty() || self.pending.iter().any(|f| matches!(f.state, FileState::Ready(_))))
     }
@@ -362,6 +396,7 @@ impl App {
         let ctx = self.ctx.clone();
         // with an account, the sync server is asked for a credit first
         let account = self.settings.sync_ready().then(|| (s.sync_server.trim().to_string(), s.sync_token.trim().to_string()));
+        let guest = self.guest();
         std::thread::spawn(move || {
             if let Some((server, token)) = account {
                 let refused = match crate::sync::spend_credit(&server, &token) {
@@ -375,6 +410,12 @@ impl App {
                         Some(text)
                     }
                     Ok(crate::sync::Spend::NoCredits) => None,
+                    // the sync account still waits: with a school login the chat works without
+                    // credits (as without an account); without one it needs the approval
+                    Ok(crate::sync::Spend::Pending) if guest => {
+                        Some(t("Your account is waiting for approval by the person who runs the sync server.").to_string())
+                    }
+                    Ok(crate::sync::Spend::Pending) => None,
                     Err(e) => Some(tf("Could not check your credits: {0}", &[&e.to_string()])),
                 };
                 if let Some(text) = refused {
@@ -633,8 +674,9 @@ impl App {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let result = crate::sync::sync(&server, &token, &send)
-                .map_err(|e| (e.downcast_ref::<crate::sync::Unauthorized>().is_some(), e.to_string()));
+            let result = crate::sync::sync(&server, &token, &send).map_err(|e| {
+                (e.downcast_ref::<crate::sync::Unauthorized>().is_some(), e.downcast_ref::<crate::sync::Pending>().is_some(), e.to_string())
+            });
             let _ = tx.send(Msg::Synced(result));
             ctx.request_repaint();
         });
@@ -659,14 +701,15 @@ impl App {
 
     fn start_school_sync_login(&mut self, server: String) {
         let Some(code) = self.school_sync_code.clone() else { return };
-        let user = self.settings.moodle_user.clone();
+        let user = self.school_sync_user.clone();
+        let method = self.login_method;
         self.logging_in = true;
         self.sync_note = None;
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let result = crate::sync::login_with_school_account(&server, &user, &code)
-                .map(|(token, name)| (server, token, name))
+            let result = crate::sync::login_with_school_account(&server, &user, &code, method)
+                .map(|ok| (server, ok.token, ok.username, ok.pending))
                 .map_err(|e| e.to_string());
             let _ = tx.send(Msg::LoggedIn(result));
             ctx.request_repaint();
@@ -689,10 +732,13 @@ impl App {
         }
         self.logging_in = true;
         self.sync_note = None;
+        let method = self.login_method;
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let result = crate::sync::login(&server, &user, &password, create).map(|(token, name)| (server, token, name)).map_err(|e| e.to_string());
+            let result = crate::sync::login(&server, &user, &password, create, method)
+                .map(|ok| (server, ok.token, ok.username, ok.pending))
+                .map_err(|e| e.to_string());
             let _ = tx.send(Msg::LoggedIn(result));
             ctx.request_repaint();
         });
@@ -712,6 +758,7 @@ impl App {
         self.sync_in_flight = None;
         self.sync_note = None;
         self.credits = None;
+        self.sync_pending = false;
     }
 
     /// "12 of 50 credits used", if the server limits credits.
@@ -726,6 +773,9 @@ impl App {
 
     /// One line about the sync: what is going on, or when it last worked.
     fn sync_status(&self) -> (bool, String) {
+        if self.sync_pending {
+            return (true, t("Waiting for approval").to_string());
+        }
         if self.sync_in_flight.is_some() {
             return (true, t("Syncing…").to_string());
         }
@@ -832,19 +882,26 @@ impl App {
                         };
                     }
                 }
-                Msg::SchoolLoginChecked { username, result, sync_code } => {
+                Msg::SchoolLoginChecked { method, username, result, sync_user, sync_code } => {
                     self.school_sync_code = sync_code;
+                    self.school_sync_user = sync_user;
                     use crate::moodle_login::LoginResult;
                     self.school_login_checking = false;
                     match result {
                         LoginResult::Accepted => {
                             self.school_login_ok = true;
+                            self.login_method = method;
                             self.school_login_error = None;
                             self.focus_input = true;
-                            // remember the user name (not the password) for next time
-                            if self.settings.moodle_user != username {
-                                let mut s = self.settings.clone();
+                            // remember the choice and the user name (not the password) for next time
+                            let mut s = self.settings.clone();
+                            s.login_method = method.to_string();
+                            if method == "moin" {
+                                s.moin_user = username;
+                            } else {
                                 s.moodle_user = username;
+                            }
+                            if s != self.settings {
                                 self.apply_settings(s);
                             }
                         }
@@ -855,7 +912,8 @@ impl App {
                 Msg::LoggedIn(result) => {
                     self.logging_in = false;
                     match result {
-                        Ok((server, token, user)) => {
+                        Ok((server, token, user, pending)) => {
+                            self.sync_pending = pending;
                             let mut s = self.settings.clone();
                             s.sync_server = server.clone();
                             s.sync_user = user.clone();
@@ -869,7 +927,11 @@ impl App {
                             let account = self.account_key();
                             self.sync_state.reset(&account);
                             self.sync_state.save();
-                            self.sync_note = Some((true, t("Logged in. Your chats are being synced.").into()));
+                            self.sync_note = Some((true, if pending {
+                                t("Logged in. Waiting for approval by the person who runs the sync server.").into()
+                            } else {
+                                t("Logged in. Your chats are being synced.").into()
+                            }));
                             self.next_sync.set(0.0);
                         }
                         Err(e) => self.sync_note = Some((false, e)),
@@ -882,6 +944,7 @@ impl App {
                     match result {
                         Ok((rev, changes, credits)) => {
                             self.credits = credits;
+                            self.sync_pending = false;
                             let active_id = self.id.clone();
                             let applied = crate::sync::apply(&mut self.convs, &mut self.sync_state, &out, rev, changes);
                             if self.convs.is_empty() {
@@ -898,7 +961,8 @@ impl App {
                                 self.sync_note = None;
                             }
                         }
-                        Err((expired, e)) => {
+                        Err((expired, pending, e)) => {
+                            self.sync_pending = pending;
                             if expired {
                                 let mut s = self.settings.clone();
                                 s.sync_token.clear();
@@ -1016,7 +1080,7 @@ impl App {
                         self.conn = Conn::Ready;
                         // automatic mode: save the answer's code right away
                         let answer = c.messages.last().filter(|m| m.role == Role::Assistant).map(|m| m.id.clone());
-                        if let Some(answer) = answer.filter(|_| self.settings.github_ready() && self.settings.github_auto) {
+                        if let Some(answer) = answer.filter(|_| self.github_on() && self.settings.github_auto) {
                             self.push_code(&conv, &answer, None);
                         }
                     }
@@ -1287,8 +1351,14 @@ impl App {
     /// Save code from an answer to GitHub: block `only` of message `msg` in chat `conv`, or
     /// all its code blocks.
     fn push_code(&mut self, conv: &str, msg: &str, only: Option<usize>) {
+        if self.guest() {
+            if let Some(n) = only {
+                self.push_states.insert(format!("{msg}#{n}"), PushState::Failed("GitHub is not available without a school login.".into()));
+            }
+            return;
+        }
         if !self.settings.github_ready() {
-            // a click on a block says why nothing happens; automatic saving just waits
+            // (the check above already handled guests) a click on a block says why nothing happens; automatic saving just waits
             if let Some(n) = only {
                 let why = if self.settings.github_token.trim().is_empty() {
                     "The GitHub token is missing. Enter it in Settings → GitHub."
@@ -1627,13 +1697,18 @@ impl App {
 
     /// The box that asks for the school login before the chat can be used.
     /// The check itself is in `moodle_login.rs`.
+    /// The start screen: log in with the OHG's Moodle or with moin.schule – or continue without
+    /// an account (class bot only, see `guest`). The checks are in `moodle_login.rs` and
+    /// `moin_login.rs`.
     fn school_login_screen(&mut self, ctx: &egui::Context) {
         let p = theme::palette(ctx.style().visuals.dark_mode);
         let mut submit = false;
+        let mut guest = false;
         egui::CentralPanel::default().frame(egui::Frame::none().fill(p.bg)).show(ctx, |ui| {
             const PAD: f32 = 28.0;
             let width = (ui.available_width() - 2.0 * PAD - 24.0).min(400.0);
-            ui.add_space((ui.available_height() - 540.0).max(16.0) / 2.0);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space((ui.available_height() - 720.0).max(16.0) / 2.0);
             ui.vertical_centered(|ui| {
               let card = egui::Frame::none()
                   .fill(p.panel)
@@ -1646,11 +1721,26 @@ impl App {
               ui.vertical_centered(|ui| {
                 theme::avatar(ui, &self.settings.display_name(), 56.0);
                 ui.add_space(10.0);
-                ui.label(RichText::new(t("Log in with your school account")).family(theme::bold()).size(20.0).color(p.text));
-                ui.label(RichText::new(t("Use your Moodle login of the school (moodle.ohg-goe.net).")).color(p.weak));
-                ui.add_space(14.0);
+                ui.label(RichText::new(t("Log in")).family(theme::bold()).size(20.0).color(p.text));
+                ui.label(RichText::new(t("How do you want to log in?")).color(p.weak));
+                ui.add_space(12.0);
 
+                // the two school logins
                 let enabled = !self.school_login_checking;
+                for (method, title, sub) in [
+                    ("moodle", t("OHG network"), t("Moodle of the OHG (moodle.ohg-goe.net)")),
+                    ("moin", "moin.schule", t("The school login of Lower Saxony")),
+                ] {
+                    let chosen = self.login_choice == method;
+                    let r = ui.add_enabled_ui(enabled, |ui| menu_row(ui, p, chosen, if method == "moodle" { "🎓" } else { "🔑" }, title, sub, &[])).inner;
+                    if r.clicked() && !chosen {
+                        self.login_choice = method;
+                        self.school_login_error = None;
+                        self.school_login_user = if method == "moin" { self.settings.moin_user.clone() } else { self.settings.moodle_user.clone() };
+                    }
+                }
+                ui.add_space(10.0);
+
                 ui.add_enabled(enabled, login_field(&mut self.school_login_user, t("User name"), false, width));
                 ui.add_space(6.0);
                 let pw = ui.add_enabled(enabled, login_field(&mut self.school_login_password, t("Password"), true, width));
@@ -1671,31 +1761,67 @@ impl App {
                 }
                 if let Some(error) = self.school_login_error {
                     ui.add_space(6.0);
-                    ui.label(RichText::new(format!("⚠ {}", t(error))).color(p.danger));
+                    ui.add(egui::Label::new(RichText::new(format!("⚠ {}", t(error))).color(p.danger)).wrap());
                 }
 
                 // What happens with the password – said right where it is typed in.
-                ui.add_space(16.0);
+                ui.add_space(14.0);
+                let host = if self.login_choice == "moin" { "auth.moin.schule" } else { "moodle.ohg-goe.net" };
                 egui::Frame::none().fill(p.surface_hi).rounding(10.0).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
                     ui.set_width(width - 24.0);
                     ui.add(
                         egui::Label::new(
-                            RichText::new(t(
-                                "Your password is only sent to moodle.ohg-goe.net to check it. It is not saved and not sent anywhere else.",
-                            ))
-                            .small()
-                            .color(p.weak),
+                            RichText::new(tf("Your password is only sent to {0} to check it. It is not saved and not sent anywhere else.", &[host]))
+                                .small()
+                                .color(p.weak),
                         )
                         .wrap(),
                     );
                     ui.hyperlink_to(RichText::new(t("How this works")).small(), SCHOOL_LOGIN_EXPLAINED);
                 });
+
+                // the third way: no account
+                ui.add_space(14.0);
+                ui.label(RichText::new(t("or")).small().color(p.weak));
+                ui.add_space(6.0);
+                let without = theme::Btn::new(theme::Kind::Secondary, t("Continue without an account")).min_size(egui::vec2(width, 36.0)).enabled(enabled);
+                if ui.add(without).clicked() {
+                    guest = true;
+                }
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(t("Only the class bot, and only with an account on a sync server that its owner has approved. No GitHub, no other bots or models, no advanced settings."))
+                            .small()
+                            .color(p.weak),
+                    )
+                    .wrap(),
+                );
               });
               });
             });
+            });
         });
-        if submit && !self.school_login_checking {
+        if guest {
+            self.continue_without_account();
+        } else if submit && !self.school_login_checking {
             self.start_school_login();
+        }
+    }
+
+    /// The third way in: no school login. Only the class bot; chatting needs an approved
+    /// account on a sync server (`chat_allowed`).
+    fn continue_without_account(&mut self) {
+        self.school_login_ok = true;
+        self.login_method = "none";
+        self.school_login_password.clear();
+        self.school_login_error = None;
+        let mut s = self.settings.clone();
+        s.login_method = "guest".into();
+        s.model.clear(); // the free models are not available
+        if s != self.settings {
+            self.draft.model.clear();
+            self.apply_settings(s);
         }
     }
 
@@ -1708,16 +1834,25 @@ impl App {
             self.school_login_error = Some("Wrong user name or password.");
             return;
         }
+        let method = self.login_choice;
         self.school_login_checking = true;
         self.school_login_error = None;
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let result = crate::moodle_login::check_login(&username, &password);
-            // for the sync server: a code made from the password, not the password itself
-            let sync_code = (result == crate::moodle_login::LoginResult::Accepted).then(|| crate::moodle_login::sync_code(&username, &password));
+            let result = if method == "moin" {
+                crate::moin_login::check_login(&username, &password)
+            } else {
+                crate::moodle_login::check_login(&username, &password)
+            };
+            // For the sync server: the school user name (moin.schule accounts get "moin-" in
+            // front, so they cannot clash with Moodle names) and a code made from the password,
+            // not the password itself.
+            let sync_user = if method == "moin" { format!("moin-{}", username.to_lowercase()) } else { username.to_lowercase() };
+            let accepted = result == crate::moodle_login::LoginResult::Accepted;
+            let sync_code = accepted.then(|| crate::moodle_login::sync_code(&sync_user, &password));
             drop(password); // not needed any more
-            let _ = tx.send(Msg::SchoolLoginChecked { username, result, sync_code });
+            let _ = tx.send(Msg::SchoolLoginChecked { method, username, result, sync_user, sync_code });
             ctx.request_repaint();
         });
     }
@@ -1737,7 +1872,7 @@ impl App {
             });
             ui.add_space(4.0);
             let (ok, status) = self.sync_status();
-            let shown = if !ok { format!("⚠ {status}") } else if self.sync_in_flight.is_some() { status } else { format!("✔ {status}") };
+            let shown = if !ok { format!("⚠ {status}") } else if self.sync_in_flight.is_some() || self.sync_pending { status } else { format!("✔ {status}") };
             ui.add(egui::Label::new(RichText::new(shown).color(if ok { p.weak } else { p.danger })).wrap());
             if let Some(line) = self.credits_line() {
                 let refill = self.credits.as_ref().and_then(|c| c.resets_at).map(|at| tf("New credits: {0}", &[&conversations::when_exact(at)]));
@@ -1772,8 +1907,8 @@ impl App {
         ui.label(RichText::new(t("Log in to keep your chats on a server and continue them on any computer.")).small().color(p.weak));
         ui.add_space(4.0);
         // the school account (from the start screen) works without typing anything
-        if self.school_sync_code.is_some() && !self.settings.moodle_user.is_empty() {
-            let label = tf("Log in as {0} (school account)", &[&self.settings.moodle_user]);
+        if self.school_sync_code.is_some() && !self.school_sync_user.is_empty() {
+            let label = tf("Log in as {0} (school account)", &[&self.school_sync_user]);
             let button = theme::Btn::new(theme::Kind::Primary, RichText::new(label).family(theme::bold())).enabled(!self.logging_in);
             if ui.add(button).clicked() {
                 match crate::sync::normalize_server(&self.draft.sync_server) {
@@ -1849,6 +1984,20 @@ impl App {
     }
 
     fn composer(&mut self, ui: &mut egui::Ui, p: theme::Palette) {
+        if !self.chat_allowed() {
+            let text = if self.sync_pending {
+                t("Your account is waiting for approval by the person who runs the sync server.")
+            } else {
+                t("Without a school login, you need an approved account on a sync server to chat.")
+            };
+            notice(ui, p.accent, |ui| {
+                ui.add(egui::Label::new(RichText::new(text).color(p.text)).wrap());
+                if !self.sync_pending && theme::secondary_button(ui, t("Log in to a sync server")).clicked() {
+                    self.open_settings();
+                    self.settings_tab = 1;
+                }
+            });
+        }
         if let (Conn::Problem(e), false) = (&self.conn, self.settings.uses_ai_models()) {
             let e = e.clone();
             notice(ui, p.danger, |ui| {
@@ -1935,7 +2084,7 @@ impl App {
                     let t = self.input.to_lowercase();
                     t.contains("github") || t.contains("repo")
                 };
-                if mentions_repo && self.pending.is_empty() && self.settings.github_ready() && self.repo_picker.is_none() {
+                if mentions_repo && self.pending.is_empty() && self.github_on() && self.repo_picker.is_none() {
                     let repo = github::normalize_repo(&self.settings.github_repo).unwrap_or_default();
                     let mut open = false;
                     ui.horizontal_wrapped(|ui| {
@@ -1998,7 +2147,7 @@ impl App {
 
                 ui.with_layout(Layout::left_to_right(Align::Max), |ui| {
                     let attach = theme::round_button(ui, theme::RoundIcon::Attach, true, 36.0);
-                    if self.settings.github_ready() {
+                    if self.github_on() {
                         // two sources: this computer or the GitHub repository
                         let menu = ui.make_persistent_id("attach-menu");
                         let attach = attach.on_hover_text(t("Attach files from this computer or from GitHub"));
@@ -2082,7 +2231,7 @@ impl App {
                     }
                     let name = self.settings.display_name();
                     let last = self.messages.len().saturating_sub(1);
-                    let github = self.settings.github_ready();
+                    let github = self.github_on();
                     let mut push = None;
                     for (i, m) in self.messages.iter().enumerate() {
                         let waiting = self.busy && i == last && m.role == Role::Assistant && m.content.is_empty();
@@ -2216,7 +2365,13 @@ impl App {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    for (i, label) in [t("General"), t("Account"), t("Free AI models"), t("GitHub"), t("Advanced")].into_iter().enumerate() {
+                    // without a school login: only General and Account
+                    let tabs = [t("General"), t("Account"), t("Free AI models"), t("GitHub"), t("Advanced")];
+                    let shown = if self.guest() { 2 } else { tabs.len() };
+                    if self.settings_tab >= shown {
+                        self.settings_tab = 0;
+                    }
+                    for (i, label) in tabs.into_iter().take(shown).enumerate() {
                         let on = self.settings_tab == i;
                         let kind = if on { theme::Kind::Secondary } else { theme::Kind::Ghost };
                         let text = RichText::new(label).color(if on { p.text } else { p.weak });
@@ -2234,7 +2389,16 @@ impl App {
                     ui.set_min_width(ui.available_width());
                     // same height on every tab, so the tabs do not jump around
                     ui.set_min_height(max_h);
+                    if tab == 0 && self.guest() {
+                        notice(ui, p.accent, |ui| {
+                            ui.add(egui::Label::new(RichText::new(t("Without a school login, other bots, free AI models, GitHub and the advanced settings are not available.")).color(p.text)).wrap());
+                        });
+                        ui.add_space(8.0);
+                    }
                     if tab == 0 {
+                    // the invite link (which bot) can only be changed with a school login
+                    let guest = self.guest();
+                    if !guest {
                     section(ui, p, |ui| {
                         ui.label(RichText::new(t("Invite link")).family(theme::bold()).color(p.text));
                         ui.label(RichText::new(t("Paste the link of the shared chat. Everything else is set up automatically.")).small().color(p.weak));
@@ -2266,6 +2430,7 @@ impl App {
                             ui.label(RichText::new(if *ok { format!("✔ {note}") } else { format!("⚠ {note}") }).color(c));
                         }
                     });
+                    }
 
                     if self.settings.is_ready() {
                         ui.add_space(8.0);
@@ -2484,6 +2649,11 @@ impl App {
                 close = true;
             }
 
+            if self.guest() {
+                ui.add_space(6.0);
+                ui.add(egui::Label::new(RichText::new(t("Without a school login, other bots, free AI models, GitHub and the advanced settings are not available.")).small().color(p.weak)).wrap());
+                return;
+            }
             ui.add_space(6.0);
             menu_heading(ui, p, &tf("Free via {0}", &[provider.name]), self.models_loading.then_some(()));
             if !has_key {

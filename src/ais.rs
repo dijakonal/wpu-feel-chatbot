@@ -1041,6 +1041,24 @@ mod tests {
         assert!(!text.contains("ai_activity"));
     }
 
+    /// `cargo test -- --ignored live_upload_kinds`: PDF and image go through the upload address.
+    #[test]
+    #[ignore]
+    fn live_upload_kinds() {
+        let mut s = Settings::default();
+        s.apply_invite_link(crate::settings::DEFAULT_INVITE_LINK).unwrap();
+        refresh(&mut s).expect("setup");
+        println!("upload address: {}", s.upload_endpoint());
+        let pdf = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj 4 0 obj<</Length 44>>stream\nBT /F1 18 Tf 20 100 Td (Banana) Tj ET\nendstream endobj 5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n".to_vec();
+        let png = include_bytes!("../assets/icon.png").to_vec();
+        for (name, bytes) in [("aufgabe.pdf", pdf), ("bild.png", png), ("big.txt", vec![b'a'; 300_000])] {
+            match upload_file(&s, name, bytes, &new_session_id()) {
+                Ok(id) => println!("{name}: ok {id}"),
+                Err(e) => println!("{name}: FAILED {e}"),
+            }
+        }
+    }
+
     /// `cargo test -- --ignored live_` : the bot follows the language note.
     #[test]
     #[ignore]

@@ -2,9 +2,15 @@
 
 *Deutsch: [weiter unten](#die-schul-anmeldung--was-mit-deinem-passwort-passiert).*
 
-Before you can use the chat, the app asks for your **Moodle user name and password** of the
-school. It checks them at the school's Moodle, **https://moodle.ohg-goe.net**, exactly like
-logging in on the Moodle website.
+When the app starts, you choose how to log in:
+
+- **OHG network:** your **Moodle** user name and password of the school. The app checks them at
+  the school's Moodle, **https://moodle.ohg-goe.net**, exactly like logging in on the Moodle
+  website. Most of this page is about this way.
+- **moin.schule:** your **moin.schule** login (the school login of Lower Saxony). The app checks
+  it at **https://auth.moin.schule** in the same way – see [moin.schule](#moinschule) below.
+- **Continue without an account:** no school login, no password. See
+  [Without an account](#without-an-account).
 
 ## In short
 
@@ -72,6 +78,7 @@ Where the password appears in the code:
 | `src/app.rs` | function `start_school_login` | takes the password out of the box (the box is empty again) and hands it to the check and, if Moodle accepted it, to `sync_code` |
 | `src/moodle_login.rs` | function `check_login` → `try_login` | puts it into the login form for moodle.ohg-goe.net (step 2) |
 | `src/moodle_login.rs` | function `sync_code` | makes the code for the sync server from it (only after Moodle accepted it) |
+| `src/moin_login.rs` | function `check_login` → `try_login` | with **moin.schule** chosen instead: puts it into the login form of auth.moin.schule |
 
 That's all. You can confirm it by searching the code for `school_login_password` and for
 `check_login`. The address that is actually contacted is written in `src/moodle_login.rs`
@@ -86,6 +93,39 @@ made-up account against the real Moodle and expects "not accepted":
 cargo test -- --ignored real_moodle
 ```
 
+## moin.schule
+
+With **moin.schule** chosen, `src/moin_login.rs` does the check instead of `moodle_login.rs`. It
+is built the same way and has the same promises: the password goes **only** to
+`https://auth.moin.schule` (written once, in `LOGIN_SERVER`), over https, and is never saved.
+The steps are those of the moin.schule website when you click "Anmelden":
+
+1. Open moin.schule's login page. It answers with a few cookies and says where to send the form.
+2. Send the form there: user name and password.
+3. A correct login is forwarded back to the moin.schule website with a one-time code; a wrong
+   one gets the login page again ("Ungültiger Benutzername oder Passwort").
+4. Log out again: the one-time code is swapped for a "ticket", which is handed straight back
+   with "log out". The app does not look inside the ticket.
+
+If moin.schule asks for another step (for example a code from an app), the app cannot do that
+and says so. The sync server gets your user name with `moin-` in front and, as with Moodle, a
+code made from the password – never the password.
+
+```bash
+cargo test -- --ignored real_moin
+```
+
+## Without an account
+
+*Continue without an account* needs no password at all. Then:
+
+- only the **class bot** answers – no free AI models, no other bots (the invite link cannot be
+  changed);
+- **GitHub** (reading the repository, saving code) is not available;
+- the **advanced settings** (upload address and the others) are hidden;
+- chatting needs an account on a **sync server** that the person running it has **approved**.
+  The server is told that this account has no school login and warns before approving it.
+
 ## Limits (honestly)
 
 - This is a **check in the app on your computer**. Someone who changes the app's source code
@@ -99,9 +139,15 @@ cargo test -- --ignored real_moodle
 
 # Die Schul-Anmeldung – was mit deinem Passwort passiert
 
-Bevor du den Chat benutzen kannst, fragt die App nach deinem **Moodle-Benutzernamen und
--Passwort** der Schule. Sie prüft beides beim Moodle der Schule, **https://moodle.ohg-goe.net**,
-genau wie beim Anmelden auf der Moodle-Webseite.
+Beim Start wählst du, wie du dich anmeldest:
+
+- **OHG-Netzwerk:** dein **Moodle**-Benutzername und -Passwort der Schule. Die App prüft beides
+  beim Moodle der Schule, **https://moodle.ohg-goe.net**, genau wie beim Anmelden auf der
+  Moodle-Webseite. Darum geht es auf dem größten Teil dieser Seite.
+- **moin.schule:** deine **moin.schule**-Anmeldung (die Schul-Anmeldung in Niedersachsen). Die
+  App prüft sie auf dieselbe Weise bei **https://auth.moin.schule** – siehe
+  [moin.schule](#moinschule-1) unten.
+- **Ohne Konto fortfahren:** keine Schul-Anmeldung, kein Passwort. Siehe [Ohne Konto](#ohne-konto).
 
 ## Kurz gesagt
 
@@ -170,11 +216,42 @@ Wo das Passwort im Code vorkommt:
 | `src/app.rs` | Funktion `start_school_login` | nimmt das Passwort aus dem Feld (das Feld ist wieder leer) und gibt es an die Prüfung und, wenn Moodle es angenommen hat, an `sync_code` |
 | `src/moodle_login.rs` | Funktion `check_login` → `try_login` | setzt es in das Anmeldeformular für moodle.ohg-goe.net (Schritt 2) |
 | `src/moodle_login.rs` | Funktion `sync_code` | macht daraus den Code für den Sync-Server (erst nachdem Moodle es angenommen hat) |
+| `src/moin_login.rs` | Funktion `check_login` → `try_login` | wenn stattdessen **moin.schule** gewählt ist: setzt es in das Anmeldeformular von auth.moin.schule |
 
 Mehr nicht. Du kannst das nachprüfen, indem du im Code nach `school_login_password` und
 `check_login` suchst. Die Adresse, die tatsächlich aufgerufen wird, steht in `src/moodle_login.rs`
 (`MOODLE_ADDRESS` und `LOGIN_PAGE`). Sonst kommt `moodle.ohg-goe.net` nur in Texten vor, die auf
 dem Bildschirm angezeigt werden (und deren Übersetzungen in `src/ui_text.rs`).
+
+## moin.schule
+
+Mit **moin.schule** übernimmt `src/moin_login.rs` die Prüfung statt `moodle_login.rs`. Die Datei
+ist genauso aufgebaut und gibt dieselben Versprechen: Das Passwort geht **nur** an
+`https://auth.moin.schule` (einmal festgelegt, in `LOGIN_SERVER`), verschlüsselt, und wird nie
+gespeichert. Die Schritte sind die der moin.schule-Webseite, wenn du auf „Anmelden“ klickst:
+
+1. Die Anmeldeseite von moin.schule öffnen. Sie antwortet mit ein paar Cookies und sagt, wohin
+   das Formular geht.
+2. Das Formular dorthin schicken: Benutzername und Passwort.
+3. Eine richtige Anmeldung wird mit einem Einmal-Code zur moin.schule-Webseite zurückgeleitet;
+   eine falsche bekommt wieder die Anmeldeseite („Ungültiger Benutzername oder Passwort“).
+4. Wieder abmelden: Der Einmal-Code wird gegen ein „Ticket“ getauscht, das sofort mit
+   „Abmelden“ zurückgegeben wird. Die App schaut nicht in das Ticket hinein.
+
+Verlangt moin.schule einen weiteren Schritt (zum Beispiel einen Code aus einer App), kann die
+App das nicht und sagt es. Der Sync-Server bekommt deinen Benutzernamen mit `moin-` davor und,
+wie bei Moodle, einen aus dem Passwort gemachten Code – nie das Passwort.
+
+## Ohne Konto
+
+*Ohne Konto fortfahren* braucht gar kein Passwort. Dann:
+
+- antwortet nur der **Klassen-Bot** – keine kostenlosen KI-Modelle, keine anderen Bots (der
+  Einladungslink lässt sich nicht ändern);
+- ist **GitHub** (Repository lesen, Code speichern) nicht verfügbar;
+- sind die **erweiterten Einstellungen** (Upload-Adresse und die anderen) ausgeblendet;
+- braucht das Chatten ein Konto auf einem **Sync-Server**, das dessen Betreiber **freigegeben**
+  hat. Der Server erfährt, dass dieses Konto keine Schul-Anmeldung hat, und warnt vor der Freigabe.
 
 ## Grenzen (ehrlich gesagt)
 

@@ -254,13 +254,27 @@ pub fn is_insecure(server: &str) -> bool {
 /// The error text of a server answer, or a fitting one for the status.
 fn failure(status: u16, body: &str) -> anyhow::Error {
     let msg = serde_json::from_str::<Value>(body).ok().and_then(|v| v["error"].as_str().map(str::to_string));
+    let pending = serde_json::from_str::<Value>(body).ok().is_some_and(|v| v["pending"] == true);
     match (status, msg) {
         (401, _) => anyhow!(Unauthorized),
+        (403, _) if pending => anyhow!(Pending),
         (_, Some(m)) => anyhow!(m),
         (404, None) => anyhow!("This address is not a sync server (404)."),
         (s, None) => anyhow!("The sync server answered with error {s}."),
     }
 }
+
+/// The account exists, but the person who runs the server has not approved it yet.
+#[derive(Debug)]
+pub struct Pending;
+
+impl std::fmt::Display for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", crate::i18n::t("Your account is waiting for approval by the person who runs the sync server."))
+    }
+}
+
+impl std::error::Error for Pending {}
 
 /// The server no longer accepts the login token (logged out elsewhere, password changed, …).
 #[derive(Debug)]
@@ -310,10 +324,20 @@ fn device_name() -> String {
     if host.is_empty() { format!("AIS.chat Client · {os}") } else { format!("AIS.chat Client · {os} · {host}") }
 }
 
-/// Log in (or create the account first). Returns the login token and the stored user name.
-pub fn login(server: &str, user: &str, password: &str, create: bool) -> Result<(String, String)> {
+/// What logging in gave: the token, the name the server stored, and whether the account still
+/// waits for approval.
+#[derive(Debug)]
+pub struct LoggedIn {
+    pub token: String,
+    pub username: String,
+    pub pending: bool,
+}
+
+/// Log in (or create the account first). `method` tells a new account's server how the person
+/// logged in to the app ("moodle", "moin" or "none"); the server shows it when approving.
+pub fn login(server: &str, user: &str, password: &str, create: bool, method: &str) -> Result<LoggedIn> {
     let path = if create { "register" } else { "login" };
-    let body = json!({ "username": user.trim(), "password": password, "device": device_name() });
+    let body = json!({ "username": user.trim(), "password": password, "device": device_name(), "method": method });
     let resp = client()?.post(format!("{server}/api/v1/{path}")).header("content-type", "application/json").body(body.to_string()).send().map_err(unreachable)?;
     let status = resp.status().as_u16();
     let text = resp.text().unwrap_or_default();
@@ -326,21 +350,25 @@ pub fn login(server: &str, user: &str, password: &str, create: bool) -> Result<(
     }
     let v: Value = serde_json::from_str(&text).map_err(|_| anyhow!("This address is not a sync server."))?;
     let token = v["token"].as_str().ok_or_else(|| anyhow!("This address is not a sync server."))?;
-    Ok((token.to_string(), v["username"].as_str().unwrap_or(user).to_string()))
+    Ok(LoggedIn {
+        token: token.to_string(),
+        username: v["username"].as_str().unwrap_or(user).to_string(),
+        pending: v["pending"].as_bool().unwrap_or(false),
+    })
 }
 
 /// Log in with the school account: the school user name and the code made from the school
 /// password (`moodle_login::sync_code`). The account is created on first use.
-pub fn login_with_school_account(server: &str, school_user: &str, code: &str) -> Result<(String, String)> {
+pub fn login_with_school_account(server: &str, school_user: &str, code: &str, method: &str) -> Result<LoggedIn> {
     let user = school_user.trim().to_lowercase();
     let usable = (3..=32).contains(&user.chars().count())
         && user.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
     if !usable {
         bail!("Your school user name cannot be used on the sync server. Log in there with your own name and password.");
     }
-    match login(server, &user, code, false) {
+    match login(server, &user, code, false, method) {
         Ok(ok) => Ok(ok),
-        Err(_) => match login(server, &user, code, true) {
+        Err(_) => match login(server, &user, code, true, method) {
             Ok(ok) => Ok(ok),
             Err(e) if e.to_string().contains("taken") => bail!(
                 "The name {user} is already used on the sync server with another password (maybe your school password changed). \
@@ -403,6 +431,8 @@ pub enum Spend {
     Refused(Credits),
     /// A server from before the credit system: nothing to check.
     NoCredits,
+    /// The account still waits for approval.
+    Pending,
 }
 
 /// Ask the server to spend one credit. The app calls this before each message to the bot.
@@ -415,7 +445,9 @@ pub fn spend_credit(server: &str, token: &str) -> Result<Spend> {
 
 fn read_spend(status: u16, text: &str) -> Result<Spend> {
     let credits = || serde_json::from_str::<Value>(text).ok().and_then(|v| serde_json::from_value::<Credits>(v["credits"].clone()).ok());
+    let pending = serde_json::from_str::<Value>(text).ok().is_some_and(|v| v["pending"] == true);
     match (status, credits()) {
+        (403, _) if pending => Ok(Spend::Pending),
         (200, Some(c)) => Ok(Spend::Spent(c)),
         (402 | 403, Some(c)) => Ok(Spend::Refused(c)),
         (404, _) => Ok(Spend::NoCredits),
@@ -548,6 +580,8 @@ mod tests {
         let blocked = r#"{"error":"blocked","credits":{"used":1,"limit":null,"period":"day","resets_at":1,"blocked":true}}"#;
         assert!(matches!(read_spend(403, blocked).unwrap(), Spend::Refused(c) if c.blocked));
         assert_eq!(read_spend(404, "").unwrap(), Spend::NoCredits, "an older server");
+        assert_eq!(read_spend(403, r#"{"error":"waiting","pending":true}"#).unwrap(), Spend::Pending);
+        assert!(failure(403, r#"{"error":"waiting","pending":true}"#).downcast_ref::<Pending>().is_some());
         assert!(read_spend(401, "").unwrap_err().downcast_ref::<Unauthorized>().is_some());
         assert!(read_spend(500, "").is_err());
     }
@@ -578,17 +612,18 @@ mod tests {
         let name = format!("Schueler{}", crate::conversations::now() % 1_000_000);
         let code = crate::moodle_login::sync_code(&name, "school-password");
         // first computer: the account does not exist yet and is created
-        let (first, user) = login_with_school_account(&server, &name, &code).expect("create");
-        assert_eq!(user, name.to_lowercase());
+        let first = login_with_school_account(&server, &name, &code, "moodle").expect("create");
+        assert_eq!(first.username, name.to_lowercase());
         // second computer, same school login: same account
-        let (second, _) = login_with_school_account(&server, &name, &crate::moodle_login::sync_code(&name, "school-password")).expect("login");
-        assert_ne!(first, second);
+        let second = login_with_school_account(&server, &name, &crate::moodle_login::sync_code(&name, "school-password"), "moodle").expect("login");
+        assert_ne!(first.token, second.token);
+        assert_eq!(first.pending, second.pending);
         // the school password itself does not work as the sync password
-        assert!(login(&server, &name, "school-password", false).is_err());
+        assert!(login(&server, &name, "school-password", false, "moodle").is_err());
         // a changed school password gives another code: refused with an explanation
-        let err = login_with_school_account(&server, &name, &crate::moodle_login::sync_code(&name, "new-password")).unwrap_err();
+        let err = login_with_school_account(&server, &name, &crate::moodle_login::sync_code(&name, "new-password"), "moodle").unwrap_err();
         assert!(err.to_string().contains("already used"), "{err}");
-        assert!(login_with_school_account(&server, "max@school", &code).unwrap_err().to_string().contains("cannot be used"));
+        assert!(login_with_school_account(&server, "max@school", &code, "moodle").unwrap_err().to_string().contains("cannot be used"));
     }
 
     /// Against a running server: `SYNC_TEST_SERVER=http://localhost:8787 cargo test -- --ignored sync_server`
@@ -597,9 +632,9 @@ mod tests {
     fn sync_server_round_trip() {
         let server = std::env::var("SYNC_TEST_SERVER").expect("SYNC_TEST_SERVER");
         let name = format!("test{}", crate::conversations::now() % 1_000_000);
-        let (token, user) = login(&server, &name, "test-password", true).expect("register");
-        assert_eq!(user, name);
-        let (laptop, phone) = (token, login(&server, &name, "test-password", false).expect("login").0);
+        let first = login(&server, &name, "test-password", true, "none").expect("register");
+        assert_eq!(first.username, name);
+        let (laptop, phone) = (first.token, login(&server, &name, "test-password", false, "none").expect("login").token);
 
         let mut here = vec![chat("a", 10, "from the laptop")];
         let mut state_here = SyncState::default();

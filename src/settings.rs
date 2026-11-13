@@ -95,6 +95,10 @@ pub struct Settings {
     /// The Moodle user name of the last successful school login – only to fill in the
     /// login box next time. (The password is never saved; see `moodle_login.rs`.)
     pub moodle_user: String,
+    /// The same for moin.schule.
+    pub moin_user: String,
+    /// The last choice on the start screen: "moodle", "moin" or "guest".
+    pub login_method: String,
 
     // ---- optional: account on a sync server (chats on every computer)
     /// e.g. `https://sync.example.org`; empty = not set up.

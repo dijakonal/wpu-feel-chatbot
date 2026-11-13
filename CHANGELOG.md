@@ -2,6 +2,25 @@
 
 Every commit raises the last number of the version (in `Cargo.toml`) and is listed here.
 
+## 1.2.5 – 2026-11-13
+
+- **Three ways in:** the start screen now offers **OHG network** (the Moodle login as
+  before), **moin.schule** (the school login of Lower Saxony, checked at
+  auth.moin.schule in the same open way) and **Continue without an account**. The
+  app remembers the last choice and user name.
+- **Without an account** only the class bot answers, and chatting needs an account
+  on a sync server that the person running it has approved. GitHub, the free AI
+  models, changing the invite link and the advanced settings (upload address and
+  others) are not available.
+- **Approval:** new sync accounts wait until the server's owner approves them. The
+  app shows "Waiting for approval" in *Settings → Account*, on the account card and
+  above the message box. With a school login the chat keeps working meanwhile, just
+  without credits.
+- The sync server is told how you logged in (Moodle, moin.schule or no school
+  login), so it can warn before approving an account without one.
+- `docs/MOODLE-LOGIN.md` explains the moin.schule check and the account-free mode in
+  English and German.
+
 ## 1.2.4 – 2026-11-12
 
 - **Sync login with the school account:** after the school login on the start
