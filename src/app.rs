@@ -58,7 +58,9 @@ enum Msg {
     /// A sync finished: the new revision and the changes from elsewhere, or
     /// `(login no longer valid, message)`.
     /// `(login no longer valid, account waits for approval, message)` on failure.
-    Synced(Result<(i64, Vec<crate::sync::Item>, Option<crate::sync::Credits>), (bool, bool, String)>),
+    Synced(Result<(i64, Vec<crate::sync::Item>, Option<crate::sync::Credits>, bool), (bool, bool, String)>),
+    /// The dashboard login for "Open the dashboard": the address to open.
+    DashboardLink(Result<String, String>),
     /// The server said where the account's credits stand.
     Credits(crate::sync::Credits),
     /// The bot summarised the first message of a chat (`None`: it did not work).
@@ -123,6 +125,8 @@ pub struct App {
     login_choice: &'static str,
     /// The sync account exists but waits for approval by the person running the server.
     sync_pending: bool,
+    /// The sync account may open the server's dashboard.
+    sync_dashboard: bool,
     /// Logging in to the sync server with the school account was tried in this run.
     school_sync_tried: bool,
 
@@ -209,6 +213,7 @@ impl App {
             login_method: "moodle",
             login_choice,
             sync_pending: false,
+            sync_dashboard: false,
             school_sync_tried: false,
             sync_state: crate::sync::SyncState::load(),
             sync_in_flight: None,
@@ -675,7 +680,10 @@ impl App {
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let result = crate::sync::sync(&server, &token, &send).map_err(|e| {
-                (e.downcast_ref::<crate::sync::Unauthorized>().is_some(), e.downcast_ref::<crate::sync::Pending>().is_some(), e.to_string())
+                // a login that no longer works, or a school account while the app runs without a
+                // school login: forget the login (a school login logs in there again by itself)
+                let unusable = e.downcast_ref::<crate::sync::Unauthorized>().is_some() || e.downcast_ref::<crate::sync::SchoolAccount>().is_some();
+                (unusable, e.downcast_ref::<crate::sync::Pending>().is_some(), e.to_string())
             });
             let _ = tx.send(Msg::Synced(result));
             ctx.request_repaint();
@@ -759,6 +767,19 @@ impl App {
         self.sync_note = None;
         self.credits = None;
         self.sync_pending = false;
+        self.sync_dashboard = false;
+    }
+
+    /// "Open the dashboard": ask the server for a dashboard login and open it in the browser.
+    fn open_dashboard(&mut self) {
+        let server = self.settings.sync_server.trim().to_string();
+        let token = self.settings.sync_token.trim().to_string();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::DashboardLink(crate::sync::dashboard_login(&server, &token).map_err(|e| e.to_string())));
+            ctx.request_repaint();
+        });
     }
 
     /// "12 of 50 credits used", if the server limits credits.
@@ -891,6 +912,7 @@ impl App {
                         LoginResult::Accepted => {
                             self.school_login_ok = true;
                             self.login_method = method;
+                            crate::sync::set_app_login(method);
                             self.school_login_error = None;
                             self.focus_input = true;
                             // remember the choice and the user name (not the password) for next time
@@ -938,12 +960,17 @@ impl App {
                     }
                 }
                 Msg::Credits(c) => self.credits = Some(c),
+                Msg::DashboardLink(result) => match result {
+                    Ok(address) => self.ctx.open_url(egui::OpenUrl::new_tab(address)),
+                    Err(e) => self.sync_note = Some((false, e)),
+                },
                 Msg::Synced(result) => {
                     let Some(out) = self.sync_in_flight.take() else { continue }; // logged out meanwhile
                     let now = self.ctx.input(|i| i.time);
                     match result {
-                        Ok((rev, changes, credits)) => {
+                        Ok((rev, changes, credits, dashboard)) => {
                             self.credits = credits;
+                            self.sync_dashboard = dashboard;
                             self.sync_pending = false;
                             let active_id = self.id.clone();
                             let applied = crate::sync::apply(&mut self.convs, &mut self.sync_state, &out, rev, changes);
@@ -1814,6 +1841,7 @@ impl App {
     fn continue_without_account(&mut self) {
         self.school_login_ok = true;
         self.login_method = "none";
+        crate::sync::set_app_login("none");
         self.school_login_password.clear();
         self.school_login_error = None;
         let mut s = self.settings.clone();
@@ -1895,6 +1923,9 @@ impl App {
                 }
                 if theme::secondary_button(ui, t("Log out")).clicked() {
                     self.logout();
+                }
+                if self.sync_dashboard && theme::secondary_button(ui, t("Open the dashboard")).on_hover_text(t("You may manage this sync server.")).clicked() {
+                    self.open_dashboard();
                 }
                 if syncing {
                     ui.add(egui::Spinner::new().size(16.0));

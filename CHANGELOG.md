@@ -2,6 +2,17 @@
 
 Every commit raises the last number of the version (in `Cargo.toml`) and is listed here.
 
+## 1.2.6 – 2026-11-13
+
+- **Open the dashboard:** if the server's owner gave your sync account dashboard
+  permissions, *Settings → Account* shows **Open the dashboard**. It opens the
+  server's dashboard in the browser, already logged in – also for accounts made with
+  a school login, which have no password you could type there.
+- **Without a school login, only accounts made without one:** the app now tells the
+  sync server how it was opened. Opened without a school login, it cannot log in to
+  an account made with Moodle or moin.schule; a saved login of such an account is
+  logged out with an explanation (a school login logs in there again by itself).
+
 ## 1.2.5 – 2026-11-13
 
 - **Three ways in:** the start screen now offers **OHG network** (the Moodle login as

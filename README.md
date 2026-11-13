@@ -82,7 +82,8 @@ again right after the check. What exactly happens, in English and German:
    never sent. Logging out keeps the chats on this computer. The server can also
    limit how much an account uses the bot: every message costs one **credit**, the
    bottom of the chat list shows the balance, and the person who runs the server
-   sets the limit in its dashboard. The login token is
+   sets the limit in its dashboard. Accounts given dashboard permissions get an
+   **Open the dashboard** button there. The login token is
    kept in the system password store like the other secrets.
 8. **➕ New chat** starts a new chat (the current one stays in the list); the round **■** button stops a long answer;
    **Copy** under an answer and on code blocks puts text on the clipboard.

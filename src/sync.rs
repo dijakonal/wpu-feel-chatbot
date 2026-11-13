@@ -197,8 +197,24 @@ pub fn apply(convs: &mut Vec<Conversation>, state: &mut SyncState, out: &Outgoin
 
 // ------------------------------------------------------------------ the server
 
+/// How the app was unlocked on the start screen ("moodle", "moin" or "none"). Sent with every
+/// request, so the server can keep an app without a school login out of school accounts.
+static APP_LOGIN: std::sync::RwLock<&'static str> = std::sync::RwLock::new("");
+
+pub fn set_app_login(method: &'static str) {
+    if let Ok(mut m) = APP_LOGIN.write() {
+        *m = method;
+    }
+}
+
 fn client() -> Result<Client> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let login = APP_LOGIN.read().map(|m| *m).unwrap_or("");
+    if !login.is_empty() {
+        headers.insert("x-app-login", reqwest::header::HeaderValue::from_static(login));
+    }
     Ok(Client::builder()
+        .default_headers(headers)
         .user_agent(concat!("ais-chat-client/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
@@ -255,14 +271,29 @@ pub fn is_insecure(server: &str) -> bool {
 fn failure(status: u16, body: &str) -> anyhow::Error {
     let msg = serde_json::from_str::<Value>(body).ok().and_then(|v| v["error"].as_str().map(str::to_string));
     let pending = serde_json::from_str::<Value>(body).ok().is_some_and(|v| v["pending"] == true);
+    let school_account = serde_json::from_str::<Value>(body).ok().is_some_and(|v| v["school_account"] == true);
     match (status, msg) {
         (401, _) => anyhow!(Unauthorized),
+        (403, _) if school_account => anyhow!(SchoolAccount),
         (403, _) if pending => anyhow!(Pending),
         (_, Some(m)) => anyhow!(m),
         (404, None) => anyhow!("This address is not a sync server (404)."),
         (s, None) => anyhow!("The sync server answered with error {s}."),
     }
 }
+
+/// The saved login belongs to an account made with a school login, but the app now runs
+/// without one – it cannot use that account.
+#[derive(Debug)]
+pub struct SchoolAccount;
+
+impl std::fmt::Display for SchoolAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", crate::i18n::t("This account belongs to a school login. Without a school login you can only use accounts made without one."))
+    }
+}
+
+impl std::error::Error for SchoolAccount {}
 
 /// The account exists, but the person who runs the server has not approved it yet.
 #[derive(Debug)]
@@ -379,6 +410,20 @@ pub fn login_with_school_account(server: &str, school_user: &str, code: &str, me
     }
 }
 
+/// A login for the server's dashboard (for an account the owner gave permissions to). The
+/// app opens `<server>/admin#login=<token>` in the browser.
+pub fn dashboard_login(server: &str, token: &str) -> Result<String> {
+    let resp = client()?.post(format!("{server}/api/v1/dashboard")).bearer_auth(token).send().map_err(unreachable)?;
+    let status = resp.status().as_u16();
+    let text = resp.text().unwrap_or_default();
+    if status != 200 {
+        return Err(failure(status, &text));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|_| anyhow!("Unexpected answer from the sync server."))?;
+    let login = v["token"].as_str().ok_or_else(|| anyhow!("Unexpected answer from the sync server."))?;
+    Ok(format!("{server}/admin#login={login}"))
+}
+
 /// Make the token useless on the server (errors do not matter: the app forgets it anyway).
 pub fn logout(server: &str, token: &str) {
     if let Ok(c) = client() {
@@ -387,7 +432,9 @@ pub fn logout(server: &str, token: &str) {
 }
 
 /// Send the changes; returns the new revision and the changes from elsewhere.
-pub fn sync(server: &str, token: &str, out: &Outgoing) -> Result<(i64, Vec<Item>, Option<Credits>)> {
+/// Returns the new revision, the changes from elsewhere, the credits, and whether the account
+/// may open the dashboard.
+pub fn sync(server: &str, token: &str, out: &Outgoing) -> Result<(i64, Vec<Item>, Option<Credits>, bool)> {
     let body = json!({ "since": out.since, "changes": out.items });
     let resp = client()?.post(format!("{server}/api/v1/sync")).bearer_auth(token).header("content-type", "application/json").body(body.to_string()).send().map_err(unreachable)?;
     let status = resp.status().as_u16();
@@ -401,9 +448,11 @@ pub fn sync(server: &str, token: &str, out: &Outgoing) -> Result<(i64, Vec<Item>
         changes: Vec<Item>,
         /// (servers before the credit system do not send this)
         credits: Option<Credits>,
+        #[serde(default)]
+        dashboard: bool,
     }
     let a: Answer = serde_json::from_str(&text).map_err(|_| anyhow!("Unexpected answer from the sync server."))?;
-    Ok((a.rev, a.changes, a.credits))
+    Ok((a.rev, a.changes, a.credits, a.dashboard))
 }
 
 // ------------------------------------------------------------------ credits
@@ -582,6 +631,7 @@ mod tests {
         assert_eq!(read_spend(404, "").unwrap(), Spend::NoCredits, "an older server");
         assert_eq!(read_spend(403, r#"{"error":"waiting","pending":true}"#).unwrap(), Spend::Pending);
         assert!(failure(403, r#"{"error":"waiting","pending":true}"#).downcast_ref::<Pending>().is_some());
+        assert!(failure(403, r#"{"error":"school","school_account":true}"#).downcast_ref::<SchoolAccount>().is_some());
         assert!(read_spend(401, "").unwrap_err().downcast_ref::<Unauthorized>().is_some());
         assert!(read_spend(500, "").is_err());
     }
@@ -639,18 +689,18 @@ mod tests {
         let mut here = vec![chat("a", 10, "from the laptop")];
         let mut state_here = SyncState::default();
         let out = outgoing(&here, &state_here);
-        let (rev, changes, _) = sync(&server, &laptop, &out).expect("sync");
+        let (rev, changes, _, _) = sync(&server, &laptop, &out).expect("sync");
         apply(&mut here, &mut state_here, &out, rev, changes);
 
         let mut there = vec![chat("b", 20, "from the phone")];
         let mut state_there = SyncState::default();
         let out = outgoing(&there, &state_there);
-        let (rev, changes, _) = sync(&server, &phone, &out).expect("sync");
+        let (rev, changes, _, _) = sync(&server, &phone, &out).expect("sync");
         apply(&mut there, &mut state_there, &out, rev, changes);
         assert_eq!(there.len(), 2, "the phone got the laptop's chat");
 
         let out = outgoing(&here, &state_here);
-        let (rev, changes, _) = sync(&server, &laptop, &out).expect("sync");
+        let (rev, changes, _, _) = sync(&server, &laptop, &out).expect("sync");
         apply(&mut here, &mut state_here, &out, rev, changes);
         assert_eq!(here.len(), 2, "and the other way round");
 
@@ -658,7 +708,7 @@ mod tests {
         let Spend::Spent(first) = spend_credit(&server, &laptop).expect("spend") else { panic!("not spent") };
         let Spend::Spent(second) = spend_credit(&server, &phone).expect("spend") else { panic!("not spent") };
         assert_eq!(second.used, first.used + 1, "both computers share the account's credits");
-        let (_, _, credits) = sync(&server, &laptop, &outgoing(&here, &state_here)).expect("sync");
+        let (_, _, credits, _) = sync(&server, &laptop, &outgoing(&here, &state_here)).expect("sync");
         assert_eq!(credits.map(|c| c.used), Some(second.used));
 
         logout(&server, &phone);
